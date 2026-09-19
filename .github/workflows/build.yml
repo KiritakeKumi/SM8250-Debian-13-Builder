@@ -150,42 +150,9 @@ jobs:
       - name: Self-test the boot image packer
         run: |
           set -euo pipefail
-          # Build a tiny synthetic boot image and read every field back.
-          WORK="$(mktemp -d)"
-          head -c 12345 /dev/urandom > "$WORK/kernel"
-          head -c 6789  /dev/urandom > "$WORK/ramdisk"
-          python3 scripts/mkbootimg.py \
-            --kernel "$WORK/kernel" --ramdisk "$WORK/ramdisk" \
-            --output "$WORK/boot.img" \
-            --cmdline "console=ttyMSM0,115200n8 root=UUID=deadbeef" \
-            --base 0x0 --kernel-offset 0x8000 --ramdisk-offset 0x1000000 \
-            --tags-offset 0x100 --second-offset 0x00f00000 \
-            --pagesize 4096 --header-version 0
-          python3 - "$WORK/boot.img" <<'PY'
-          import struct, sys, hashlib, os
-          p = sys.argv[1]
-          with open(p, 'rb') as f:
-              h = f.read(4096)
-          assert h[:8] == b'ANDROID!', 'bad magic'
-          ksize, kaddr = struct.unpack_from('<II', h, 8)
-          rsize, raddr = struct.unpack_from('<II', h, 16)
-          tags, = struct.unpack_from('<I', h, 32)
-          page, = struct.unpack_from('<I', h, 36)
-          hver, = struct.unpack_from('<I', h, 40)
-          cmd = h[64:64+512].split(b'\0')[0].decode()
-          assert (ksize, kaddr) == (12345, 0x8000), (ksize, hex(kaddr))
-          assert (rsize, raddr) == (6789, 0x1000000), (rsize, hex(raddr))
-          assert tags == 0x100, hex(tags)
-          assert page == 4096, page
-          assert hver == 0, hver
-          assert 'root=UUID=deadbeef' in cmd, cmd
-          # kernel must start at offset 4096, ramdisk right after its page
-          with open(p, 'rb') as f:
-              data = f.read()
-          assert len(data) == 4096 + 4096 + 8192, len(data)
-          print('  packer self-test OK')
-          print(f'    size={len(data)} kernel@{kaddr:#x} ramdisk@{raddr:#x} tags@{tags:#x}')
-          PY
+          # Exercises page padding, page-aligned blobs, an empty ramdisk,
+          # over-long cmdline rejection and the optional second stage.
+          python3 scripts/test-mkbootimg.py
 
       - name: Lint shell scripts and repo wiring
         run: |
