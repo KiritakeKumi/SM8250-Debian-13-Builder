@@ -25,6 +25,18 @@
 
 > 首次运行大约 **60–120 分钟**（内核全量编译）。之后命中缓存会快很多。
 
+### 关于 CI 磁盘空间
+
+GitHub 的 **arm64 runner 只有 14 GB 磁盘**（`ubuntu-24.04-arm`）。本流水线需要
+约 8–10 GB，所以：
+
+- 用 `scripts/free-disk-space.sh` 做清理，**没有**用第三方 action
+  （`descriptinc/free-disk-space` 在 arm64 上会执行
+  `apt-get remove google-chrome-stable`，那是 x86-only 包，会直接让 job 失败）。
+- `mkrootfs-image.sh` 会在创建镜像前检查剩余空间，不够就明确报错而不是中途 ENOSPC。
+- 如果还是空间不足：把 `rootfs_size_mb` 调小（最小 rootfs 约 1.5 GB，
+  默认 6000 是给后续装东西留余量）。
+
 ---
 
 ## 参数说明
@@ -90,6 +102,8 @@ scripts/
   mkrootfs-image.sh             rootfs → ext4 镜像
   build-bootimg.sh              打包 Android boot image
   check-dts.sh                  设备树离线校验
+  validate.sh                   仓库/脚本静态校验
+  free-disk-space.sh            CI 上清理磁盘（arm64 安全）
 docs/
   FLASHING.md                   刷机步骤
   HARDWARE.md                   硬件与已知问题

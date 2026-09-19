@@ -78,9 +78,40 @@ for node in pcie1-sequencer pcie1-asm2806-controls-default pcie1-lan1-pullup-sta
 done
 
 echo "== workflow references =="
-for s in fetch-kernel.sh fetch-dts.sh build-kernel.sh build-modules.sh build-rootfs.sh mkrootfs-image.sh build-bootimg.sh check-dts.sh validate.sh; do
+for s in fetch-kernel.sh fetch-dts.sh build-kernel.sh build-modules.sh build-rootfs.sh mkrootfs-image.sh build-bootimg.sh check-dts.sh validate.sh free-disk-space.sh; do
     if grep -q "$s" .github/workflows/build.yml; then ok "$s"; else bad "$s not referenced"; fi
 done
+
+echo "== no x86-only third-party disk action =="
+# Match only non-comment lines: the workflow/script deliberately *mention*
+# descriptinc/free-disk-space and google-chrome-stable in explanatory comments.
+if grep -vE '^\s*#' .github/workflows/build.yml | grep -q 'descriptinc/free-disk-space'; then
+    bad "descriptinc/free-disk-space is used (it fails on arm64: google-chrome-stable)"
+else
+    ok "not using descriptinc/free-disk-space"
+fi
+if grep -vE '^\s*#' scripts/free-disk-space.sh | grep -q 'google-chrome-stable'; then
+    bad "free-disk-space.sh removes google-chrome-stable (x86-only, aborts apt on arm64)"
+else
+    ok "free-disk-space.sh avoids x86-only packages"
+fi
+if grep -q 'dpkg-query' scripts/free-disk-space.sh; then
+    ok "free-disk-space.sh filters by installed packages"
+else
+    bad "free-disk-space.sh does not filter by installed packages"
+fi
+
+echo "== build runner is arm64 (no qemu needed) =="
+if grep -q 'runs-on: ubuntu-24.04-arm' .github/workflows/build.yml; then
+    ok "build job on ubuntu-24.04-arm"
+else
+    bad "build job is not on an arm64 runner"
+fi
+if grep -q 'qemu-user-static' .github/workflows/build.yml; then
+    bad "workflow still installs qemu-user-static"
+else
+    ok "no qemu-user-static dependency"
+fi
 
 echo "== sparse-checkout must include include/uapi =="
 # include/dt-bindings/input/linux-event-codes.h is a symlink into include/uapi;

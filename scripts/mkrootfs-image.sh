@@ -25,6 +25,21 @@ IMG="$OUTDIR/${IMAGE_NAME}-${RELEASE_NAME}.rootfs.img"
 USED_MB="$(du -sm "$ROOTFS" | cut -f1)"
 if (( USED_MB + 300 > ROOTFS_SIZE_MB )); then
     echo "ERROR: rootfs uses ${USED_MB} MiB but image size is only ${ROOTFS_SIZE_MB} MiB" >&2
+    echo "       Raise rootfs_size_mb, or trim packages.txt." >&2
+    exit 1
+fi
+
+# Check free space before creating the image.
+#
+# The image is created with truncate (sparse), so it does not consume
+# ROOTFS_SIZE_MB up front -- but writing the actual rootfs into it does consume
+# roughly USED_MB. Also budget for the final artifact upload/compression.
+NEED_MB=$(( USED_MB + 1024 ))
+AVAIL_MB=$(( $(df -Pk "$OUTDIR" | awk 'NR==2 {print $4}') / 1024 ))
+echo "rootfs tree: ${USED_MB} MiB   image size: ${ROOTFS_SIZE_MB} MiB   free here: ${AVAIL_MB} MiB"
+if (( AVAIL_MB < NEED_MB )); then
+    echo "ERROR: need about ${NEED_MB} MiB free in $OUTDIR but only ${AVAIL_MB} MiB is available." >&2
+    echo "       Lower rootfs_size_mb, or free space (see scripts/free-disk-space.sh)." >&2
     exit 1
 fi
 

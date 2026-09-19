@@ -180,16 +180,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # NOTE: intentionally NOT using descriptinc/free-disk-space.
+      # That action runs `apt-get remove -y ... google-chrome-stable ...` with no
+      # `|| true`; google-chrome-stable is x86-only, so on ubuntu-24.04-arm apt
+      # aborts with "E: Unable to locate package" and the step fails.
       - name: Free disk space
-        uses: descriptinc/free-disk-space@main
-        with:
-          tool-cache: true
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: false
+        run: bash scripts/free-disk-space.sh
 
       - name: Show runner info
         run: |
@@ -198,6 +194,8 @@ jobs:
           nproc
           free -h
           df -h /
+          echo "---- mount points (looking for a bigger scratch fs) ----"
+          df -h
 
       - name: Install host dependencies
         run: |
