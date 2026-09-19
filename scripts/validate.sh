@@ -168,6 +168,31 @@ else
     bad "no modules.order assertion"
 fi
 
+echo "== scripts that need root must self-elevate =="
+# debootstrap/chroot (build-rootfs.sh) and loop mount + mkfs (mkrootfs-image.sh)
+# need root. In CI the runner has passwordless sudo, so they re-exec themselves.
+for f in scripts/build-rootfs.sh scripts/mkrootfs-image.sh; do
+    if grep -q 're-executing with sudo' "$f"; then
+        ok "$f self-elevates"
+    else
+        bad "$f needs root but does not self-elevate"
+    fi
+    # `sudo VAR=... cmd` is not portable; require the `sudo env VAR=...` form.
+    if grep -qE 'exec sudo env' "$f"; then
+        ok "$f uses 'sudo env' (portable)"
+    else
+        bad "$f does not use 'sudo env' for the re-exec"
+    fi
+done
+# scripts that do NOT need root should not silently escalate
+for f in scripts/build-kernel.sh scripts/build-modules.sh scripts/build-bootimg.sh; do
+    if grep -q 're-executing with sudo' "$f"; then
+        bad "$f self-elevates but does not need root"
+    else
+        ok "$f needs no root"
+    fi
+done
+
 echo "== kernel version must be pinned exactly =="
 # A previous run silently fetched the 6.18.y branch HEAD (6.18.52) while the
 # job was configured for 6.18.35, producing a wrong-version image.

@@ -17,6 +17,25 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/config/image.conf"
 
+# ---------------------------------------------------------------------------
+# Loop-mounting the image needs root. Re-exec with sudo, carrying the config
+# across (sudo's env_reset would drop it otherwise).
+# ---------------------------------------------------------------------------
+if [[ "$(id -u)" -ne 0 ]]; then
+    if command -v sudo >/dev/null 2>&1; then
+        echo "re-executing with sudo (loop mount needs root)"
+        exec sudo env \
+            WORKSPACE="$WORKSPACE" \
+            ROOTFS_SIZE_MB="$ROOTFS_SIZE_MB" \
+            RELEASE_NAME="$RELEASE_NAME" \
+            OUTDIR="${OUTDIR:-}" \
+            bash "$(readlink -f "$0")" "$@"
+    fi
+    echo "ERROR: this script must run as root (loop mount)." >&2
+    echo "       Re-run with sudo." >&2
+    exit 1
+fi
+
 LOGDIR="$WORKSPACE/logs"
 mkdir -p "$OUTDIR" "$LOGDIR"
 

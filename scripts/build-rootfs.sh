@@ -33,6 +33,38 @@ KREL="$(cat "$ART/kernelrelease.txt")"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/config/image.conf"
 
+# ---------------------------------------------------------------------------
+# debootstrap / chroot / mount all need root.
+#
+# In CI the runner user has passwordless sudo. Re-exec ourselves as root and
+# explicitly carry the configuration across: sudo's env_reset would otherwise
+# drop the variables this script is driven by. `sudo env VAR=...` is used
+# rather than `sudo VAR=...` because the latter is not portable.
+# ---------------------------------------------------------------------------
+if [[ "$(id -u)" -ne 0 ]]; then
+    if command -v sudo >/dev/null 2>&1; then
+        echo "re-executing with sudo (debootstrap/chroot need root)"
+        exec sudo env \
+            WORKSPACE="$WORKSPACE" \
+            KERNEL_VERSION="$KERNEL_VERSION" \
+            WITH_NIC_FIX="$WITH_NIC_FIX" \
+            OUTDIR="${OUTDIR:-}" \
+            RELEASE_NAME="$RELEASE_NAME" \
+            DEBIAN_SUITE="$DEBIAN_SUITE" \
+            DEBIAN_MIRROR="$DEBIAN_MIRROR" \
+            DEBIAN_SECURITY_MIRROR="$DEBIAN_SECURITY_MIRROR" \
+            TARGET_HOSTNAME="$TARGET_HOSTNAME" \
+            TARGET_ROOT_PASSWORD="$TARGET_ROOT_PASSWORD" \
+            TARGET_ENABLE_SSH="$TARGET_ENABLE_SSH" \
+            TARGET_EXTRA_PACKAGES="$TARGET_EXTRA_PACKAGES" \
+            TARGET_MAKE_USER="$TARGET_MAKE_USER" \
+            bash "$(readlink -f "$0")" "$@"
+    fi
+    echo "ERROR: this script must run as root (debootstrap, chroot, mount)." >&2
+    echo "       Re-run with sudo." >&2
+    exit 1
+fi
+
 # debootstrap/chroot only works natively. The CI runner is ubuntu-24.04-arm,
 # so this should always be arm64. On x86 you would need qemu-user-static +
 # binfmt and to pass --foreign, which this script deliberately does not do.

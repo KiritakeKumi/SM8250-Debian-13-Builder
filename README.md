@@ -133,10 +133,15 @@ bash scripts/fetch-kernel.sh
 bash scripts/fetch-dts.sh
 bash scripts/build-kernel.sh
 bash scripts/build-modules.sh   # 仅当 WITH_NIC_FIX=true
-bash scripts/build-rootfs.sh
-bash scripts/mkrootfs-image.sh
+bash scripts/build-rootfs.sh    # 需要 root，会自动 sudo 提权
+bash scripts/mkrootfs-image.sh  # 需要 root，会自动 sudo 提权
 bash scripts/build-bootimg.sh
 ```
+
+> `build-rootfs.sh`（debootstrap/chroot）和 `mkrootfs-image.sh`（loop mount + mkfs）
+> 需要 root。这两个脚本会**自己调用 sudo 重新执行**，并把配置通过
+> `sudo env VAR=...` 传进去，所以直接 `bash scripts/build-rootfs.sh` 就行。
+> 其它脚本不需要 root。
 
 产物在 `work/out/`：
 
