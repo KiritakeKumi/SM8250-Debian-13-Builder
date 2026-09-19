@@ -1,0 +1,342 @@
+name: Build Debian 13 Image
+
+# 手动触发，按需选择内核版本 / 设备树来源 / 是否带网卡修复
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "Linux kernel version (kernel.org tarball)"
+        required: true
+        default: "6.18.35"
+        type: string
+      dtb_source:
+        description: "Device tree source"
+        required: true
+        default: "upstream-armbian"
+        type: choice
+        options:
+          - upstream-armbian
+          - upstream-vendor-dg
+          - custom
+      with_nic_fix:
+        description: "Build + install out-of-tree ASM2806/RTL8168 helper modules"
+        required: true
+        default: true
+        type: boolean
+      rootfs_size_mb:
+        description: "rootfs image size in MiB (must be >= real UFS rootfs partition)"
+        required: true
+        default: "6000"
+        type: string
+      hostname:
+        description: "Target hostname"
+        required: true
+        default: "nico-sm8250"
+        type: string
+      root_password:
+        description: "root password (changed on first login)"
+        required: true
+        default: "root"
+        type: string
+      enable_ssh:
+        description: "Enable sshd in the image"
+        required: true
+        default: true
+        type: boolean
+      extra_packages:
+        description: "Extra packages, space separated"
+        required: false
+        default: ""
+        type: string
+      make_default_user:
+        description: "Create a normal user (dg) with sudo"
+        required: true
+        default: true
+        type: boolean
+      build_release_name:
+        description: "Release label used in artifact filenames"
+        required: true
+        default: "trixie"
+        type: string
+      publish_release:
+        description: "Also publish the images as a GitHub pre-release"
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/build.yml"
+      - "config/**"
+      - "dts/**"
+      - "modules/**"
+      - "scripts/**"
+
+concurrency:
+  group: build-${{ github.ref }}-${{ github.event.inputs.kernel_version || 'default' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # Cheap first gate: make sure the DTS + overlay actually compiles before we
+  # spend an hour building a kernel.
+  validate-dts:
+    name: Validate device tree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            device-tree-compiler gcc python3 curl ca-certificates
+
+      - name: Fetch kernel DT headers (sparse, retried)
+        run: |
+          set -euo pipefail
+          KVER="${{ inputs.kernel_version || '6.18.35' }}"
+          TAG="v${KVER%.*}"
+          DEST="$PWD/kdts"
+          rm -rf "$DEST"; mkdir -p "$DEST"
+          cd "$DEST"
+          git init -q .
+          git remote add origin https://github.com/torvalds/linux.git
+          git config core.sparseCheckout true
+          git sparse-checkout init --cone
+          git sparse-checkout set include/dt-bindings arch/arm64/boot/dts/qcom scripts/dtc/include-prefixes
+          # kernel.org / github can be flaky; retry with increasing depth
+          for i in 1 2 3 4 5; do
+            if git fetch --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG"; then break; fi
+            echo "fetch attempt $i failed, retrying..."
+            sleep 15
+          done
+          git checkout -q "$TAG"
+          echo "dt-bindings headers: $(find include/dt-bindings -name '*.h' | wc -l)"
+          echo "qcom dtsi files: $(ls arch/arm64/boot/dts/qcom/*.dtsi | wc -l)"
+
+      - name: Merge DTS + overlay and compile
+        run: |
+          set -euo pipefail
+          KSRC="$PWD/kdts"
+          # shellcheck source=/dev/null
+          source config/image.conf
+          WORK="$(mktemp -d)"
+
+          DTS_SRC="dts/${DTS_FILE}.dts"
+          test -s "$DTS_SRC"
+
+          cat "$DTS_SRC" dts/patches/nic-fix-overlay.dtsi > "$WORK/merged.dts"
+
+          gcc -E -nostdinc \
+              -I "$KSRC/scripts/dtc/include-prefixes" \
+              -I "$KSRC/arch/arm64/boot/dts/qcom" \
+              -I "$KSRC/arch/arm64/boot/dts" \
+              -I "$KSRC/include" \
+              -undef -D__DTS__ -x assembler-with-cpp \
+              -o "$WORK/merged.pre.dts" "$WORK/merged.dts"
+
+          dtc -o "$WORK/merged.dtb" -b 0 \
+              -i "$KSRC/arch/arm64/boot/dts/qcom" \
+              -i "$KSRC/scripts/dtc/include-prefixes" \
+              -Wno-unique_unit_address -Wno-unit_address_vs_reg \
+              -Wno-avoid_unnecessary_addr_size -Wno-alias_paths \
+              -Wno-graph_child_address -Wno-simple_bus_reg \
+              "$WORK/merged.pre.dts"
+
+          dtc -I dtb -O dts "$WORK/merged.dtb" > "$WORK/decoded.dts"
+          echo "===== decoded key nodes ====="
+          grep -nE 'pcie1-sequencer|tc-eb5-pcie-sequencer|sm8250-pinctrl|pci_e1|iommu-map|asm2806-controls|lan1-pullup' "$WORK/decoded.dts" || true
+
+          FAIL=0
+          for pat in 'pcie1-sequencer' 'thundercomm,tc-eb5-pcie-sequencer' 'qcom,sm8250-pinctrl' \
+                     'pci_e1' 'iommu-map' 'asm2806-controls-default' 'lan1-pullup-state'; do
+            if grep -q "$pat" "$WORK/decoded.dts"; then
+              echo "  OK   $pat"
+            else
+              echo "  MISS $pat"; FAIL=1
+            fi
+          done
+          if [ "$FAIL" = "1" ]; then echo "DTS validation FAILED" >&2; exit 1; fi
+          echo "DTS validation passed"
+
+  build:
+    name: Build (${{ inputs.kernel_version || '6.18.35' }} / ${{ inputs.dtb_source || 'upstream-armbian' }})
+    needs: validate-dts
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 350
+
+    env:
+      WORKSPACE: ${{ github.workspace }}/work
+      OUTDIR: ${{ github.workspace }}/work/out
+      KERNEL_VERSION: ${{ inputs.kernel_version || '6.18.35' }}
+      DTB_SOURCE: ${{ inputs.dtb_source || 'upstream-armbian' }}
+      WITH_NIC_FIX: ${{ inputs.with_nic_fix == false && 'false' || 'true' }}
+      ROOTFS_SIZE_MB: ${{ inputs.rootfs_size_mb || '6000' }}
+      TARGET_HOSTNAME: ${{ inputs.hostname || 'nico-sm8250' }}
+      TARGET_ROOT_PASSWORD: ${{ inputs.root_password || 'root' }}
+      TARGET_ENABLE_SSH: ${{ inputs.enable_ssh == false && 'false' || 'true' }}
+      TARGET_EXTRA_PACKAGES: ${{ inputs.extra_packages || '' }}
+      TARGET_MAKE_USER: ${{ inputs.make_default_user == false && 'false' || 'true' }}
+      RELEASE_NAME: ${{ inputs.build_release_name || 'trixie' }}
+      DEBIAN_SUITE: trixie
+      DEBIAN_MIRROR: http://deb.debian.org/debian
+      DEBIAN_SECURITY_MIRROR: http://security.debian.org/debian-security
+      SOURCE_DATE_EPOCH: "1700000000"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: descriptinc/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Show runner info
+        run: |
+          set -euo pipefail
+          uname -a
+          nproc
+          free -h
+          df -h /
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev libncurses-dev \
+            device-tree-compiler kmod cpio rsync busybox-static \
+            debootstrap \
+            gdisk e2fsprogs dosfstools parted uuid-runtime \
+            android-sdk-libsparse-utils zstd xz-utils \
+            python3 python3-pip git curl ca-certificates
+
+      - name: Show resolved image name
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source config/image.conf
+          echo "IMAGE_NAME=$IMAGE_NAME" | tee -a "$GITHUB_ENV"
+          echo "DTS_FILE=$DTS_FILE" | tee -a "$GITHUB_ENV"
+
+      - name: Cache kernel source + build tree
+        id: kernel-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            work/src/linux-${{ env.KERNEL_VERSION }}
+            work/build/linux
+          key: kbuild-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-${{ env.WITH_NIC_FIX }}-${{ hashFiles('config/kernel-fragment.config', 'dts/**') }}
+          restore-keys: |
+            kbuild-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-
+            kbuild-${{ env.KERNEL_VERSION }}-
+
+      - name: Prepare directories
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORKSPACE/src" "$WORKSPACE/build" "$OUTDIR" "$WORKSPACE/rootfs"
+
+      - name: Fetch kernel source
+        run: bash scripts/fetch-kernel.sh
+
+      - name: Fetch device tree
+        run: bash scripts/fetch-dts.sh
+
+      - name: Build kernel
+        run: bash scripts/build-kernel.sh
+
+      - name: Build out-of-tree NIC helper modules
+        if: env.WITH_NIC_FIX == 'true'
+        run: bash scripts/build-modules.sh
+
+      - name: Build rootfs
+        run: bash scripts/build-rootfs.sh
+
+      - name: Pack rootfs into ext4 image
+        run: bash scripts/mkrootfs-image.sh
+
+      - name: Pack Android boot images
+        run: bash scripts/build-bootimg.sh
+
+      - name: Generate checksums and manifest
+        run: |
+          set -euo pipefail
+          cd "$OUTDIR"
+          sha256sum *.img > SHA256SUMS
+          cat > MANIFEST.txt <<EOF
+          image_name:      ${IMAGE_NAME}
+          kernel_version:  $KERNEL_VERSION
+          dtb_source:      $DTB_SOURCE
+          with_nic_fix:    $WITH_NIC_FIX
+          rootfs_size_mb:  $ROOTFS_SIZE_MB
+          release:         $RELEASE_NAME
+          git_sha:         $GITHUB_SHA
+          build_date_utc:  $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+          ls -lh
+          cat MANIFEST.txt
+
+      - name: Upload boot images
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-images-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-nic${{ env.WITH_NIC_FIX }}
+          path: |
+            work/out/*.boot.img
+            work/out/*.boot-recovery.img
+            work/out/SHA256SUMS
+            work/out/MANIFEST.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload rootfs image
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-image-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-nic${{ env.WITH_NIC_FIX }}
+          path: |
+            work/out/*.rootfs.img
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}
+          path: |
+            work/logs/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.kernel_version }}-${{ inputs.dtb_source }}-${{ github.run_number }}
+          name: "Debian 13 for nico-debian-sm8250 (${{ inputs.kernel_version }}, ${{ inputs.dtb_source }})"
+          files: dist/**
+          draft: false
+          prerelease: true

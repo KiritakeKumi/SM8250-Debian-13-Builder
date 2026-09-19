@@ -1,0 +1,19 @@
+# build scratch space (all build outputs live here)
+/work/
+/out/
+*.img
+*.dtb
+*.preprocessed.dts
+*.merged.dts
+
+# python
+__pycache__/
+*.pyc
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

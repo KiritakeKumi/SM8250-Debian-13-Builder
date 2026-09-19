@@ -1,0 +1,32 @@
+# Extra packages installed into the rootfs, one per line.
+# Lines starting with # are ignored. Blank lines are ignored.
+#
+# These are already part of the base set in scripts/build-rootfs.sh:
+#   systemd, udev, kmod, initramfs-tools, openssh-server, iproute2,
+#   ethtool, sudo, nano, gdisk, e2fsprogs, usbutils, pciutils
+#
+# Add board-specific extras below.
+
+# --- convenience ----------------------------------------------------------
+htop
+curl
+wget
+git
+unzip
+ca-certificates
+
+# --- network troubleshooting ---------------------------------------------
+tcpdump
+dnsutils
+netcat-openbsd
+bridge-utils
+
+# --- containers / virtualization (the board supports KVM) -----------------
+# uncomment if you want to run VMs / containers out of the box
+# qemu-system-arm
+# libvirt-daemon-system
+# docker.io
+
+# --- wifi / bluetooth (QCA6390) ------------------------------------------
+iw
+bluez

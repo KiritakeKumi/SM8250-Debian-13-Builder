@@ -1,0 +1,118 @@
+/*
+ * Appended to the board DTS when WITH_NIC_FIX=true.
+ *
+ * Turns on PCIe1 (the ASM2806 switch + the two RTL8168 NICs) and adds the
+ * board helper node that the out-of-tree tc-eb5-pcie-helper module binds to.
+ *
+ * The module owns the physical power/reset GPIOs and exposes PERST as a normal
+ * GPIO provider; the *unmodified* mainline qcom-pcie driver consumes it. No
+ * kernel source patch is involved.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	/*
+	 * eb5-board.c gates itself on this compatible. Keep the original
+	 * qrb5165-rb5 entry too so anything already matching on it still works.
+	 */
+	compatible = "thundercomm,eb5", "qcom,qrb5165-rb5", "qcom,sm8250";
+
+	pcie1_sequence: pcie1-sequencer {
+		compatible = "thundercomm,tc-eb5-pcie-sequencer";
+		gpio-controller;
+		#gpio-cells = <2>;
+		reset-gpios = <&tlmm 82 GPIO_ACTIVE_LOW>;
+		control-gpios = <&tlmm 88 GPIO_ACTIVE_HIGH>,
+				<&tlmm 89 GPIO_ACTIVE_HIGH>,
+				<&tlmm 121 GPIO_ACTIVE_HIGH>,
+				<&tlmm 127 GPIO_ACTIVE_HIGH>,
+				<&tlmm 126 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcie1_asm2806_controls_default>;
+	};
+};
+
+/*
+ * PCIe1: wired Ethernet sits behind an ASM2806 PCIe switch on this port.
+ * The ASM2806 and its downstream endpoints share the root port's SID range;
+ * the per-BDF SID entries below are what the verified board bring-up uses.
+ */
+&pcie1 {
+	status = "okay";
+	num-lanes = <2>;
+	/* Consumed from the board helper, not from the physical TLMM pin. */
+	perst-gpios = <&pcie1_sequence 0 GPIO_ACTIVE_LOW>;
+	wake-gpios = <&tlmm 22 GPIO_ACTIVE_HIGH>;
+	pinctrl-names = "default", "pullup";
+	pinctrl-0 = <&pcie1_eb5_default_state>, <&pcie1_lan1_pullup>;
+	pinctrl-1 = <&pcie1_lan1_pullup>;
+
+	iommu-map = <0x000 &apps_smmu 0x1c80 0x1>,
+		    <0x100 &apps_smmu 0x1c81 0x1>,
+		    <0x200 &apps_smmu 0x1c82 0x1>,
+		    <0x230 &apps_smmu 0x1c83 0x1>,
+		    <0x270 &apps_smmu 0x1c84 0x1>,
+		    <0x300 &apps_smmu 0x1c85 0x1>,
+		    <0x400 &apps_smmu 0x1c86 0x1>,
+		    <0x500 &apps_smmu 0x1c87 0x1>,
+		    <0x600 &apps_smmu 0x1c88 0x1>;
+};
+
+&pcie1_phy {
+	status = "okay";
+	vdda-phy-supply = <&vreg_l5a_0p88>;
+	vdda-pll-supply = <&vreg_l9a_1p2>;
+};
+
+&tlmm {
+	pcie1_asm2806_controls_default: pcie1-asm2806-controls-default {
+		perst-pins {
+			pins = "gpio82";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+
+		controls-pins {
+			pins = "gpio88", "gpio89", "gpio121", "gpio126";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+
+		control127-pins {
+			pins = "gpio127";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+
+	/* GPIO141 stays a wake input on this board; the helper never drives it. */
+	pcie1_lan1_pullup: pcie1-lan1-pullup-state {
+		pins = "gpio141";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		input-enable;
+	};
+
+	pcie1_eb5_default_state: pcie1-eb5-default-state {
+		clkreq-pins {
+			pins = "gpio83";
+			function = "pci_e1";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+
+		wake-pins {
+			pins = "gpio22";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
+};

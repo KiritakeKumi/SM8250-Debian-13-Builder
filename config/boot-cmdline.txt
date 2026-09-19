@@ -1,0 +1,9 @@
+# Kernel command line for the nico-debian-sm8250.
+#
+# scripts/build-bootimg.sh substitutes @ROOTFS_UUID@ with the real UUID of the
+# generated rootfs image, then packs this into the Android boot header.
+#
+# NOTE: the board's bootloader only forwards ~511 bytes of cmdline. Keep it
+# short; build-bootimg.sh hard-fails if this grows past that.
+
+clk_ignore_unused pd_ignore_unused loglevel=8 panic=30 audit=0 allow_mismatched_32bit_el0 mem_sleep_default=s2idle console=tty0 earlycon=qcom_geni,0xa90000 console=ttyMSM0,115200n8 pcie_pme=nomsi root=UUID=@ROOTFS_UUID@ rw
