@@ -87,9 +87,13 @@ make -C "$KSRC" O="$KDIR" ARCH=arm64 -s kernelrelease | tee "$ART/kernelrelease.
 # ---------------------------------------------------------------------------
 # 2. Build
 # ---------------------------------------------------------------------------
+# NOTE: we deliberately do NOT pass the `dtbs` target. It would build every
+# board DTB under arch/arm64/boot/dts/qcom/ (~200 of them, including apq8016,
+# ipq8074, ...), which is slow and pollutes the log with unrelated warnings.
+# Our board DTB is compiled separately in step 3, straight from $WORKSPACE/dts.
 JOBS="$(nproc)"
 echo "building kernel with -j$JOBS"
-make -C "$KSRC" O="$KDIR" ARCH=arm64 -j"$JOBS" Image.gz dtbs 2>&1 | tee "$LOGDIR/kernel-build.log"
+make -C "$KSRC" O="$KDIR" ARCH=arm64 -j"$JOBS" Image.gz 2>&1 | tee "$LOGDIR/kernel-build.log"
 
 test -s "$KDIR/arch/arm64/boot/Image.gz" || { echo "Image.gz not built" >&2; exit 1; }
 cp -v "$KDIR/arch/arm64/boot/Image.gz" "$ART/Image.gz"
@@ -114,19 +118,32 @@ if [[ "$WITH_NIC_FIX" == "true" ]]; then
     DTB_SRC="$DTS_DIR/$DTS_NAME.merged.dts"
 fi
 
-cpp_flags=(
-    -nostdinc
-    -I "$KSRC/scripts/dtc/include-prefixes"
-    -I "$KSRC/arch/arm64/boot/dts/qcom"
-    -I "$KSRC/arch/arm64/boot/dts"
-    -I "$DTS_DIR"
-    -undef -D__DTS__ -x assembler-with-cpp
-)
-# also let the kernel's dt-bindings headers resolve
-cpp_flags+=( -I "$KSRC/include" )
-
 echo "preprocessing $DTS_NAME"
-gcc "${cpp_flags[@]}" -o "$ART/$DTB_BASENAME.preprocessed.dts" "$DTB_SRC"
+# -E is REQUIRED: without it gcc tries to *assemble* the DTS instead of just
+# running the preprocessor, and you get a wall of
+#   "Assembler messages: Error: unknown mnemonic `interrupt'"
+# because the file is not assembly.
+gcc -E -nostdinc \
+    -I "$KSRC/scripts/dtc/include-prefixes" \
+    -I "$KSRC/arch/arm64/boot/dts/qcom" \
+    -I "$KSRC/arch/arm64/boot/dts" \
+    -I "$KSRC/include" \
+    -I "$DTS_DIR" \
+    -undef -D__DTS__ -x assembler-with-cpp \
+    -o "$ART/$DTB_BASENAME.preprocessed.dts" "$DTB_SRC"
+
+test -s "$ART/$DTB_BASENAME.preprocessed.dts" || {
+    echo "ERROR: DTS preprocessing produced nothing" >&2
+    exit 1
+}
+# The preprocessed output must still look like a device tree.
+if ! grep -q '^/dts-v1/;' "$ART/$DTB_BASENAME.preprocessed.dts"; then
+    echo "ERROR: preprocessed DTS does not start with /dts-v1/;" >&2
+    echo "       first 5 lines were:" >&2
+    head -5 "$ART/$DTB_BASENAME.preprocessed.dts" >&2
+    exit 1
+fi
+echo "  preprocessed: $(wc -l < "$ART/$DTB_BASENAME.preprocessed.dts") lines"
 
 echo "compiling $DTB_BASENAME.dtb"
 "$KDIR/scripts/dtc/dtc" -o "$ART/$DTB_BASENAME.dtb" -b 0 \
@@ -137,11 +154,6 @@ echo "compiling $DTB_BASENAME.dtb"
     "$ART/$DTB_BASENAME.preprocessed.dts" 2>&1 | tee "$LOGDIR/dtc.log"
 
 test -s "$ART/$DTB_BASENAME.dtb" || { echo "DTB not built" >&2; exit 1; }
-
-# Sanity: the board DT must actually describe pcie1.
-if command -v fdtget >/dev/null 2>&1; then
-    fdtget -l "$ART/$DTB_BASENAME.dtb" /soc@0 >/dev/null 2>&1 || true
-fi
 echo "DTB size: $(stat -c%s "$ART/$DTB_BASENAME.dtb") bytes"
 
 # ---------------------------------------------------------------------------

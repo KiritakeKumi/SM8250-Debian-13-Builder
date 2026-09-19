@@ -131,6 +131,30 @@ echo "== user defaults =="
 if grep -q 'debian:debian' scripts/build-rootfs.sh; then ok "user debian/debian"; else bad "user debian/debian not set"; fi
 if grep -q '010-debian' scripts/build-rootfs.sh; then ok "sudoers for debian"; else bad "sudoers for debian missing"; fi
 
+echo "== DTS preprocessing must use gcc -E =="
+# Without -E, gcc tries to *assemble* the DTS and emits a wall of
+# "Assembler messages: Error: unknown mnemonic ...". This bit us in CI.
+for f in scripts/build-kernel.sh scripts/check-dts.sh; do
+    if grep -qE 'gcc[[:space:]]+-E[[:space:]]' "$f"; then
+        ok "$f uses gcc -E"
+    else
+        bad "$f invokes gcc without -E (will try to assemble the DTS)"
+    fi
+done
+
+echo "== build-kernel.sh must not build every qcom DTB =="
+# `make ... dtbs` builds ~200 unrelated board DTBs; we compile ours separately.
+if grep -E 'make .*-j"\$JOBS" Image\.gz dtbs' scripts/build-kernel.sh >/dev/null 2>&1; then
+    bad "build-kernel.sh still passes the dtbs target (builds all qcom DTBs)"
+else
+    ok "build-kernel.sh builds only Image.gz"
+fi
+if grep -q 'preprocessed DTS does not start with /dts-v1' scripts/build-kernel.sh; then
+    ok "build-kernel.sh sanity-checks the preprocessed DTS"
+else
+    bad "no /dts-v1/ sanity check after preprocessing"
+fi
+
 echo
 if (( fail )); then echo "VALIDATION FAILED"; exit 1; fi
 echo "ALL CHECKS PASSED"
