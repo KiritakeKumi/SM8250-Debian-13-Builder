@@ -77,14 +77,44 @@ GPIO  126  : high, 保持 120ms
 2. **`tc-eb5-qmp-pcie`**（可选，本仓库默认不编）
    - 树外的 QMP PCIe PHY 实现，带厂商 PHY sequence 和诊断。
 
-### 实测状态
+### 实测验证（真实部署机器）
 
-已验证（朋友那套 `tc-eb5-oot 0.2.1`，Linux 6.13.12）：
+一台已部署的 DG-SVR-865-TINY（Armbian 26.5.1，`6.18.35-current-sm8250`）
+上实测的启动日志：
 
-- `24.6s` Gen3 x2 link up
-- 4 个 ASM2806 bridge function + 2 个 RTL8168 枚举
-- `r8169` 在 `24.708s / 24.719s` 绑定，`async=0`
-- 5 分钟 11 次采样，AER 计数为 0
+```
+[ 10.850995] qcom-pcie 1c08000.pcie: PCIe Gen.3 x2 link up
+[ 10.943742] pci 0001:01:00.0: [1b21:2806] ASM2806 Switch Upstream Port
+[ 11.017286] pci 0001:02:00.0: [1b21:2806] ASM2806 Switch Downstream Port
+[ 11.071340] pci 0001:02:06.0: [1b21:2806] ASM2806 Switch Downstream Port
+[ 11.125384] pci 0001:02:0e.0: [1b21:2806] ASM2806 Switch Downstream Port
+[ 11.212515] pci 0001:04:00.0: [10ec:8168] PCIe Endpoint
+[ 11.283540] pci 0001:05:00.0: [10ec:8168] PCIe Endpoint
+[ 11.767049] NETGATE: native host bound; opening supplier async=0 seen=3
+[ 11.816001] r8169 0001:04:00.0 eth0: RTL8168h/8111h
+[ 11.839096] NETGATE: bound 0001:04:00.0 driver=r8169 async=0
+```
+
+对应的 GPIO 时序（同一台机器）：
+
+```
+EB5 ASM2806: verified TLMM controls; GPIO141 remains wake input
+EB5 ASM2806: GPIO82  requested=1 dir=0 raw=1 hold_ms=100
+EB5 ASM2806: GPIO82  requested=0 dir=0 raw=0 hold_ms=200
+EB5 ASM2806: GPIO88  requested=0 dir=0 raw=0 hold_ms=10
+EB5 ASM2806: GPIO88  requested=1 dir=0 raw=1 hold_ms=10
+EB5 ASM2806: GPIO89  requested=0 dir=0 raw=0 hold_ms=10
+EB5 ASM2806: GPIO89  requested=1 dir=0 raw=1 hold_ms=10
+EB5 ASM2806: GPIO121 requested=1 dir=0 raw=1 hold_ms=5000
+EB5 ASM2806: GPIO127 requested=1 dir=0 raw=1 hold_ms=0
+EB5 ASM2806: GPIO126 requested=1 dir=0 raw=1 hold_ms=120
+EB5 ASM2806: sequence complete; PERST held low for PHY init
+EB5 ASM2806: pre-PERST-release settle 10 ms
+EB5 ASM2806: post-PERST settle 200 ms (before LTSSM)
+```
+
+模块信息：`version 0.2.1`、`vermagic 6.18.35-current-sm8250`、
+`alias of:N*T*Cthundercomm,tc-eb5-pcie-sequencer`。
 
 **未验证**：真实网络吞吐、冷启动多次循环、休眠唤醒。
 

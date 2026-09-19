@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
-# Fetch the kernel source for $KERNEL_VERSION.
+# Fetch the kernel source for $KERNEL_VERSION from kernel.org.
 #
-# Two ways to get it, in order of preference:
+# The tarball is used directly. This works because the driver_override
+# backport our out-of-tree module needs is already present in the 6.18 stable
+# series by 6.18.35:
 #
-#   1. The kernel.org release tarball (fast, ~150 MB, checksummed).
-#   2. A shallow clone of the matching stable branch (slower, but survives
-#      kernel.org being unavailable and always carries the newest backports).
+#   modules/tc-eb5/eb5-bind-gate.c calls device_has_driver_override().
+#   That helper -- plus the nested `struct device.driver_override { name; lock; }`
+#   and the removal of `struct pci_dev.driver_override` -- landed upstream in
+#   7.0 and was backported into the 6.18 stable series between 6.18.20 and
+#   6.18.30. Verified present in v6.18.35.
 #
-# Why we care about the stable series specifically:
-#   modules/tc-eb5/eb5-bind-gate.c calls device_has_driver_override(). That
-#   helper (plus the nested `struct device.driver_override { name; lock; }`)
-#   landed upstream in 7.0 and was then backported into the 6.18 stable series
-#   between 6.18.20 and 6.18.30. A mainline *release* tag like v6.18 does NOT
-#   have it; a stable tag like v6.18.30+ does.
+#   The board's working Armbian kernel (6.18.35-current-sm8250) exposes exactly
+#   this API, and the shipped tc-eb5-pcie-helper.ko references
+#   device_has_driver_override, so the two match.
 #
-#   The board's working Armbian kernel is built from the 6.18 stable branch and
-#   has the backport, which is why the shipped tc-eb5-pcie-helper.ko links
-#   against device_has_driver_override.
-#
-# So: after fetching, we verify the helper is present and fail early with a
-# clear message if it is not, instead of producing a confusing compile error.
+# A stable-branch shallow clone is kept as a fallback for when kernel.org is
+# unreachable. After fetching we verify the helper is present and fail early
+# with a clear message if it is not.
 set -euo pipefail
 
 : "${WORKSPACE:?WORKSPACE not set}"
@@ -31,8 +29,8 @@ LOGDIR="$WORKSPACE/logs"
 mkdir -p "$SRC_DIR" "$LOGDIR"
 
 major_minor="${KERNEL_VERSION%.*}"          # 6.18.35 -> 6.18
-stable_branch="linux-${major_minor}.y"      # linux-6.18.y
 series="v${major_minor}.x"                  # v6.18.x
+stable_branch="linux-${major_minor}.y"      # linux-6.18.y
 
 if [[ -f "$KSRC/Makefile" ]]; then
     echo "kernel source already present at $KSRC"
@@ -41,7 +39,7 @@ if [[ -f "$KSRC/Makefile" ]]; then
 fi
 
 have_helper() {
-    grep -rqs 'device_has_driver_override' "$1/include/linux/device.h" 2>/dev/null
+    grep -q 'device_has_driver_override' "$1/include/linux/device.h" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -62,6 +60,8 @@ try_tarball() {
     if curl -fsL --retry 3 --connect-timeout 30 -o "$SRC_DIR/$tarball.sha256" "$url.sha256" 2>/dev/null; then
         echo "   verifying sha256"
         ( cd "$SRC_DIR" && sha256sum -c "$tarball.sha256" ) || { echo "   checksum mismatch"; return 1; }
+    else
+        echo "   no upstream .sha256 published; skipping verification"
     fi
 
     echo "   extracting"
@@ -74,13 +74,6 @@ try_tarball() {
 
     if [[ ! -f "$KSRC/Makefile" ]]; then
         echo "   no Makefile after extraction"
-        return 1
-    fi
-
-    if ! have_helper "$KSRC"; then
-        echo "   NOTE: this tarball lacks device_has_driver_override();"
-        echo "         falling back to the stable branch"
-        rm -rf "$KSRC"
         return 1
     fi
     return 0
@@ -103,18 +96,15 @@ try_branch() {
         if git -C "$worktree" fetch --depth 1 --no-tags origin "$stable_branch"; then
             break
         fi
-        [[ $attempt -eq 5 ]] && { echo "   all fetch attempts failed"; rm -rf "$worktree"; return 1; }
+        if [[ $attempt -eq 5 ]]; then
+            echo "   all fetch attempts failed"
+            rm -rf "$worktree"
+            return 1
+        fi
         sleep 15
     done
 
     git -C "$worktree" checkout -q FETCH_HEAD
-
-    if ! have_helper "$worktree"; then
-        echo "   stable branch head still lacks the helper; giving up"
-        rm -rf "$worktree"
-        return 1
-    fi
-
     mv "$worktree" "$KSRC"
     return 0
 }
@@ -124,20 +114,29 @@ try_branch() {
 # ---------------------------------------------------------------------------
 if ! try_tarball; then
     if ! try_branch; then
-        cat >&2 <<EOF
-
-ERROR: could not obtain a suitable kernel source for $KERNEL_VERSION.
-
-modules/tc-eb5/eb5-bind-gate.c needs device_has_driver_override(), which is
-present in the 6.18 stable series from about 6.18.30 onwards (and in 7.0+).
-Pick KERNEL_VERSION >= 6.18.30, or set WITH_NIC_FIX=false to build without the
-board helper modules.
-EOF
+        echo "ERROR: could not obtain kernel source for $KERNEL_VERSION" >&2
         exit 1
     fi
 fi
 
 test -f "$KSRC/Makefile" || { echo "kernel source missing at $KSRC" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Verify the API the out-of-tree module needs is present.
+# Fail early with an actionable message instead of a confusing compile error.
+# ---------------------------------------------------------------------------
+if ! have_helper "$KSRC"; then
+    cat >&2 <<EOF
+
+ERROR: $KSRC does not provide device_has_driver_override().
+
+modules/tc-eb5/eb5-bind-gate.c needs it. It is present in the 6.18 stable
+series from about 6.18.30 onwards, and in 7.0+. Either:
+  - pick KERNEL_VERSION >= 6.18.30, or
+  - set WITH_NIC_FIX=false to build without the board helper modules.
+EOF
+    exit 1
+fi
 
 echo
 echo "== kernel source ready =="
