@@ -147,6 +147,46 @@ jobs:
           set -euo pipefail
           bash scripts/check-dts.sh "$PWD/kdts"
 
+      - name: Self-test the boot image packer
+        run: |
+          set -euo pipefail
+          # Build a tiny synthetic boot image and read every field back.
+          WORK="$(mktemp -d)"
+          head -c 12345 /dev/urandom > "$WORK/kernel"
+          head -c 6789  /dev/urandom > "$WORK/ramdisk"
+          python3 scripts/mkbootimg.py \
+            --kernel "$WORK/kernel" --ramdisk "$WORK/ramdisk" \
+            --output "$WORK/boot.img" \
+            --cmdline "console=ttyMSM0,115200n8 root=UUID=deadbeef" \
+            --base 0x0 --kernel-offset 0x8000 --ramdisk-offset 0x1000000 \
+            --tags-offset 0x100 --second-offset 0x00f00000 \
+            --pagesize 4096 --header-version 0
+          python3 - "$WORK/boot.img" <<'PY'
+          import struct, sys, hashlib, os
+          p = sys.argv[1]
+          with open(p, 'rb') as f:
+              h = f.read(4096)
+          assert h[:8] == b'ANDROID!', 'bad magic'
+          ksize, kaddr = struct.unpack_from('<II', h, 8)
+          rsize, raddr = struct.unpack_from('<II', h, 16)
+          tags, = struct.unpack_from('<I', h, 32)
+          page, = struct.unpack_from('<I', h, 36)
+          hver, = struct.unpack_from('<I', h, 40)
+          cmd = h[64:64+512].split(b'\0')[0].decode()
+          assert (ksize, kaddr) == (12345, 0x8000), (ksize, hex(kaddr))
+          assert (rsize, raddr) == (6789, 0x1000000), (rsize, hex(raddr))
+          assert tags == 0x100, hex(tags)
+          assert page == 4096, page
+          assert hver == 0, hver
+          assert 'root=UUID=deadbeef' in cmd, cmd
+          # kernel must start at offset 4096, ramdisk right after its page
+          with open(p, 'rb') as f:
+              data = f.read()
+          assert len(data) == 4096 + 4096 + 8192, len(data)
+          print('  packer self-test OK')
+          print(f'    size={len(data)} kernel@{kaddr:#x} ramdisk@{raddr:#x} tags@{tags:#x}')
+          PY
+
       - name: Lint shell scripts and repo wiring
         run: |
           set -euo pipefail
@@ -208,6 +248,29 @@ jobs:
             gdisk e2fsprogs dosfstools parted uuid-runtime \
             android-sdk-libsparse-utils zstd xz-utils \
             python3 python3-pip git curl ca-certificates
+
+      - name: Verify host tools
+        run: |
+          set -euo pipefail
+          fail=0
+          # NOTE: mkbootimg is deliberately NOT required. We ship our own
+          # header-v0 packer (scripts/mkbootimg.py) because the distro package
+          # is v34 and mkbootimg is not on PyPI at all.
+          for t in gcc make dtc debootstrap busybox e2fsck mke2fs \
+                   sha256sum curl git python3; do
+            if command -v "$t" >/dev/null 2>&1; then
+              printf '  OK   %-12s %s\n' "$t" "$(command -v "$t")"
+            else
+              printf '  MISS %-12s\n' "$t"
+              fail=1
+            fi
+          done
+          if (( fail )); then
+            echo "ERROR: required host tools are missing" >&2
+            exit 1
+          fi
+          echo "boot image packer:"
+          python3 scripts/mkbootimg.py --help 2>&1 | head -2
 
       - name: Show resolved image name
         run: |

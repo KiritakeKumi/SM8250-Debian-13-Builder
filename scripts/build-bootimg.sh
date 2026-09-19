@@ -55,33 +55,30 @@ if (( ${#CMDLINE} > 511 )); then
 fi
 
 # ---------------------------------------------------------------------------
-# mkbootimg
+# Pack the image
 # ---------------------------------------------------------------------------
-# Prefer the Debian/Ubuntu packaged tool; fall back to the pip one.
-MKBOOTIMG=""
-for cand in mkbootimg /usr/bin/mkbootimg; do
-    if command -v "$cand" >/dev/null 2>&1; then MKBOOTIMG="$cand"; break; fi
-done
-if [[ -z "$MKBOOTIMG" ]]; then
-    pip3 install --quiet --break-system-packages mkbootimg 2>/dev/null || \
-        pip3 install --quiet mkbootimg
-    MKBOOTIMG="$(command -v mkbootimg)"
-fi
-echo "using mkbootimg: $MKBOOTIMG"
+# scripts/mkbootimg.py is a self-contained header-v0 packer. It is used instead
+# of the distro `mkbootimg` because:
+#   - mkbootimg is NOT on PyPI (`pip install mkbootimg` fails), and
+#   - the distro version is v34 and may not write header_version 0.
+# Our packer was verified by repacking the board's own boot.img: the result is
+# byte-identical apart from the 32-byte id field.
+PACKER="$REPO_ROOT/scripts/mkbootimg.py"
 
 mk_one() {
     local out="$1" ramdisk="$2"
-    "$MKBOOTIMG" \
+    python3 "$PACKER" \
         --kernel         "$KERNEL_BLOB" \
         --ramdisk        "$ramdisk" \
         --base           0x0 \
-        --second_offset  0x00f00000 \
+        --second-offset  0x00f00000 \
         --cmdline        "$CMDLINE" \
-        --kernel_offset  0x8000 \
-        --ramdisk_offset 0x1000000 \
-        --tags_offset    0x100 \
+        --kernel-offset  0x8000 \
+        --ramdisk-offset 0x1000000 \
+        --tags-offset    0x100 \
         --pagesize       4096 \
-        -o "$out"
+        --header-version 0 \
+        --output         "$out"
     echo "wrote $out ($(stat -c%s "$out") bytes)"
 }
 

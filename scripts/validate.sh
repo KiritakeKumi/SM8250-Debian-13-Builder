@@ -168,6 +168,33 @@ else
     bad "no modules.order assertion"
 fi
 
+echo "== boot image packing must not depend on a distro mkbootimg =="
+# mkbootimg is not on PyPI, and the distro package is v34 (may not do v0).
+# We ship our own packer instead.
+if [[ -s scripts/mkbootimg.py ]]; then
+    ok "scripts/mkbootimg.py present"
+else
+    bad "scripts/mkbootimg.py missing"
+fi
+if grep -vE '^\s*#' scripts/build-bootimg.sh | grep -q 'pip3\? install.*mkbootimg'; then
+    bad "build-bootimg.sh still tries to pip install mkbootimg (it is not on PyPI)"
+else
+    ok "build-bootimg.sh does not pip install mkbootimg"
+fi
+if grep -q 'scripts/mkbootimg.py' scripts/build-bootimg.sh; then
+    ok "build-bootimg.sh uses the bundled packer"
+else
+    bad "build-bootimg.sh does not use scripts/mkbootimg.py"
+fi
+# the packer must write header_version 0 and the board's exact addresses
+for pat in 'header_version' '0x8000' '0x1000000' '0x100' '4096'; do
+    if grep -q "$pat" scripts/mkbootimg.py; then
+        ok "packer handles $pat"
+    else
+        bad "packer missing $pat"
+    fi
+done
+
 echo "== scripts that need root must self-elevate =="
 # debootstrap/chroot (build-rootfs.sh) and loop mount + mkfs (mkrootfs-image.sh)
 # need root. In CI the runner has passwordless sudo, so they re-exec themselves.
