@@ -84,6 +84,17 @@ check_config CONFIG_MODULES y
 echo "---- kernel release ----"
 make -C "$KSRC" O="$KDIR" ARCH=arm64 -s kernelrelease | tee "$ART/kernelrelease.txt"
 
+# Guard against silently building a different kernel than requested: the
+# release string feeds the module vermagic and the artifact names.
+KREL_CHECK="$(cat "$ART/kernelrelease.txt")"
+if [[ "$KREL_CHECK" != "$KERNEL_VERSION" && "$KREL_CHECK" != "$KERNEL_VERSION"+* ]]; then
+    echo "ERROR: kernelrelease is '$KREL_CHECK' but KERNEL_VERSION is '$KERNEL_VERSION'." >&2
+    echo "       The source tree is the wrong version. Delete work/src/linux-$KERNEL_VERSION" >&2
+    echo "       and the matching CI cache, then rerun." >&2
+    exit 1
+fi
+echo "release string OK: $KREL_CHECK"
+
 # ---------------------------------------------------------------------------
 # 2. Build
 # ---------------------------------------------------------------------------
@@ -91,11 +102,18 @@ make -C "$KSRC" O="$KDIR" ARCH=arm64 -s kernelrelease | tee "$ART/kernelrelease.
 # board DTB under arch/arm64/boot/dts/qcom/ (~200 of them, including apq8016,
 # ipq8074, ...), which is slow and pollutes the log with unrelated warnings.
 # Our board DTB is compiled separately in step 3, straight from $WORKSPACE/dts.
+#
+# `modules` IS required: step 4 runs `modules_install`, which needs the
+# modules.order file that only the `modules` target produces. Building just
+# Image.gz leads to:
+#     No rule to make target 'modules.order', needed by '.../modules.order'
 JOBS="$(nproc)"
 echo "building kernel with -j$JOBS"
-make -C "$KSRC" O="$KDIR" ARCH=arm64 -j"$JOBS" Image.gz 2>&1 | tee "$LOGDIR/kernel-build.log"
+make -C "$KSRC" O="$KDIR" ARCH=arm64 -j"$JOBS" Image.gz modules \
+    2>&1 | tee "$LOGDIR/kernel-build.log"
 
 test -s "$KDIR/arch/arm64/boot/Image.gz" || { echo "Image.gz not built" >&2; exit 1; }
+test -s "$KDIR/modules.order" || { echo "modules.order not produced" >&2; exit 1; }
 cp -v "$KDIR/arch/arm64/boot/Image.gz" "$ART/Image.gz"
 
 # ---------------------------------------------------------------------------

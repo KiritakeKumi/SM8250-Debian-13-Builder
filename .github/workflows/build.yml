@@ -224,10 +224,15 @@ jobs:
           path: |
             work/src/linux-${{ env.KERNEL_VERSION }}
             work/build/linux
-          key: kbuild-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-${{ env.WITH_NIC_FIX }}-${{ hashFiles('config/kernel-fragment.config', 'dts/**') }}
+          # v2: the v1 cache could contain the wrong source tree (a previous
+          # fallback checked out a branch HEAD instead of the requested tag).
+          # scripts/fetch-kernel.sh now validates the version and refetches if
+          # it does not match, but starting from a clean key avoids the
+          # pointless download in the first place.
+          key: v2-kbuild-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-${{ env.WITH_NIC_FIX }}-${{ hashFiles('config/kernel-fragment.config', 'dts/**') }}
           restore-keys: |
-            kbuild-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-
-            kbuild-${{ env.KERNEL_VERSION }}-
+            v2-kbuild-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-
+            v2-kbuild-${{ env.KERNEL_VERSION }}-
 
       - name: Prepare directories
         run: |

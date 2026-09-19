@@ -147,12 +147,44 @@ echo "== build-kernel.sh must not build every qcom DTB =="
 if grep -E 'make .*-j"\$JOBS" Image\.gz dtbs' scripts/build-kernel.sh >/dev/null 2>&1; then
     bad "build-kernel.sh still passes the dtbs target (builds all qcom DTBs)"
 else
-    ok "build-kernel.sh builds only Image.gz"
+    ok "build-kernel.sh builds only Image.gz + modules"
 fi
 if grep -q 'preprocessed DTS does not start with /dts-v1' scripts/build-kernel.sh; then
     ok "build-kernel.sh sanity-checks the preprocessed DTS"
 else
     bad "no /dts-v1/ sanity check after preprocessing"
+fi
+
+echo "== build-kernel.sh must build the modules target =="
+# modules_install needs modules.order, which only `make modules` produces.
+if grep -qE 'make .*Image\.gz modules' scripts/build-kernel.sh; then
+    ok "build-kernel.sh builds Image.gz modules"
+else
+    bad "build-kernel.sh does not build 'modules' (modules_install will fail)"
+fi
+if grep -q 'modules.order not produced' scripts/build-kernel.sh; then
+    ok "build-kernel.sh asserts modules.order exists"
+else
+    bad "no modules.order assertion"
+fi
+
+echo "== kernel version must be pinned exactly =="
+# A previous run silently fetched the 6.18.y branch HEAD (6.18.52) while the
+# job was configured for 6.18.35, producing a wrong-version image.
+if grep -q 'branch:linux-\|linux-\${major_minor}\.y' scripts/fetch-kernel.sh; then
+    bad "fetch-kernel.sh still references a branch (version drift risk)"
+else
+    ok "fetch-kernel.sh fetches by exact tag, not branch"
+fi
+if grep -q 'source_is_good' scripts/fetch-kernel.sh; then
+    ok "fetch-kernel.sh validates the fetched version"
+else
+    bad "fetch-kernel.sh does not validate the fetched version"
+fi
+if grep -q 'kernelrelease is' scripts/build-kernel.sh; then
+    ok "build-kernel.sh asserts kernelrelease matches KERNEL_VERSION"
+else
+    bad "no kernelrelease assertion"
 fi
 
 echo
