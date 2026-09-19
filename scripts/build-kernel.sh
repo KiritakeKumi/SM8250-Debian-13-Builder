@@ -31,6 +31,19 @@ mkdir -p "$KDIR" "$ART" "$LOGDIR"
 
 test -f "$KSRC/Makefile" || { echo "kernel source missing at $KSRC" >&2; exit 1; }
 
+# The DTS preprocessor needs the full dt-bindings set. In particular
+# include/dt-bindings/input/linux-event-codes.h is a symlink into include/uapi.
+for h in include/dt-bindings/input/linux-event-codes.h \
+         include/uapi/linux/input-event-codes.h \
+         arch/arm64/boot/dts/qcom/sm8250.dtsi ; do
+    [[ -e "$KSRC/$h" ]] || {
+        echo "ERROR: kernel source is incomplete: $KSRC/$h is missing." >&2
+        echo "       A full tarball has everything; a sparse checkout needs" >&2
+        echo "       both include/dt-bindings and include/uapi." >&2
+        exit 1
+    }
+done
+
 # ---------------------------------------------------------------------------
 # 1. Assemble .config
 # ---------------------------------------------------------------------------

@@ -108,61 +108,49 @@ jobs:
           git remote add origin https://github.com/torvalds/linux.git
           git config core.sparseCheckout true
           git sparse-checkout init --cone
-          git sparse-checkout set include/dt-bindings arch/arm64/boot/dts/qcom scripts/dtc/include-prefixes
-          # kernel.org / github can be flaky; retry with increasing depth
+          # NOTE: include/uapi is REQUIRED. include/dt-bindings/input/linux-event-codes.h
+          # is a symlink into include/uapi/linux/input-event-codes.h, and pm8150.dtsi
+          # pulls it in via dt-bindings/input/input.h. Without it the preprocessor
+          # fails with "linux-event-codes.h: No such file or directory".
+          git sparse-checkout set \
+              include/dt-bindings \
+              include/uapi \
+              arch/arm64/boot/dts/qcom \
+              scripts/dtc/include-prefixes
+          # github can be flaky; retry
           for i in 1 2 3 4 5; do
-            if git fetch --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG"; then break; fi
+            if git fetch --depth 1 --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"; then break; fi
             echo "fetch attempt $i failed, retrying..."
             sleep 15
           done
           git checkout -q "$TAG"
+
           echo "dt-bindings headers: $(find include/dt-bindings -name '*.h' | wc -l)"
-          echo "qcom dtsi files: $(ls arch/arm64/boot/dts/qcom/*.dtsi | wc -l)"
+          echo "uapi headers:        $(find include/uapi -name '*.h' | wc -l)"
+          echo "qcom dtsi files:     $(ls arch/arm64/boot/dts/qcom/*.dtsi | wc -l)"
 
-      - name: Merge DTS + overlay and compile
-        run: |
-          set -euo pipefail
-          KSRC="$PWD/kdts"
-          # shellcheck source=/dev/null
-          source config/image.conf
-          WORK="$(mktemp -d)"
-
-          DTS_SRC="dts/${DTS_FILE}.dts"
-          test -s "$DTS_SRC"
-
-          cat "$DTS_SRC" dts/patches/nic-fix-overlay.dtsi > "$WORK/merged.dts"
-
-          gcc -E -nostdinc \
-              -I "$KSRC/scripts/dtc/include-prefixes" \
-              -I "$KSRC/arch/arm64/boot/dts/qcom" \
-              -I "$KSRC/arch/arm64/boot/dts" \
-              -I "$KSRC/include" \
-              -undef -D__DTS__ -x assembler-with-cpp \
-              -o "$WORK/merged.pre.dts" "$WORK/merged.dts"
-
-          dtc -o "$WORK/merged.dtb" -b 0 \
-              -i "$KSRC/arch/arm64/boot/dts/qcom" \
-              -i "$KSRC/scripts/dtc/include-prefixes" \
-              -Wno-unique_unit_address -Wno-unit_address_vs_reg \
-              -Wno-avoid_unnecessary_addr_size -Wno-alias_paths \
-              -Wno-graph_child_address -Wno-simple_bus_reg \
-              "$WORK/merged.pre.dts"
-
-          dtc -I dtb -O dts "$WORK/merged.dtb" > "$WORK/decoded.dts"
-          echo "===== decoded key nodes ====="
-          grep -nE 'pcie1-sequencer|tc-eb5-pcie-sequencer|sm8250-pinctrl|pci_e1|iommu-map|asm2806-controls|lan1-pullup' "$WORK/decoded.dts" || true
-
-          FAIL=0
-          for pat in 'pcie1-sequencer' 'thundercomm,tc-eb5-pcie-sequencer' 'qcom,sm8250-pinctrl' \
-                     'pci_e1' 'iommu-map' 'asm2806-controls-default' 'lan1-pullup-state'; do
-            if grep -q "$pat" "$WORK/decoded.dts"; then
-              echo "  OK   $pat"
+          # Fail fast if a symlinked dt-binding lost its target.
+          for h in include/dt-bindings/input/linux-event-codes.h \
+                   include/dt-bindings/clock/qcom,dispcc-sm8150.h \
+                   include/dt-bindings/clock/qcom,dispcc-sm8350.h \
+                   include/dt-bindings/clock/qcom,sm8650-dispcc.h ; do
+            if [[ -e "$h" ]]; then
+              echo "  OK   $h"
             else
-              echo "  MISS $pat"; FAIL=1
+              echo "  BROKEN SYMLINK: $h -> $(readlink "$h" 2>/dev/null || echo '?')" >&2
+              exit 1
             fi
           done
-          if [ "$FAIL" = "1" ]; then echo "DTS validation FAILED" >&2; exit 1; fi
-          echo "DTS validation passed"
+
+      - name: Validate DTS + overlay
+        run: |
+          set -euo pipefail
+          bash scripts/check-dts.sh "$PWD/kdts"
+
+      - name: Lint shell scripts and repo wiring
+        run: |
+          set -euo pipefail
+          bash scripts/validate.sh
 
   build:
     name: Build (${{ inputs.kernel_version || '6.18.35' }} / ${{ inputs.dtb_source || 'upstream-armbian' }})
@@ -253,6 +241,9 @@ jobs:
 
       - name: Fetch device tree
         run: bash scripts/fetch-dts.sh
+
+      - name: Preflight DTS check
+        run: bash scripts/check-dts.sh "$WORKSPACE/src/linux-$KERNEL_VERSION"
 
       - name: Build kernel
         run: bash scripts/build-kernel.sh

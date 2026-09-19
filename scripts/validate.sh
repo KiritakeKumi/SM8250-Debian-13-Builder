@@ -78,9 +78,27 @@ for node in pcie1-sequencer pcie1-asm2806-controls-default pcie1-lan1-pullup-sta
 done
 
 echo "== workflow references =="
-for s in fetch-kernel.sh fetch-dts.sh build-kernel.sh build-modules.sh build-rootfs.sh mkrootfs-image.sh build-bootimg.sh; do
+for s in fetch-kernel.sh fetch-dts.sh build-kernel.sh build-modules.sh build-rootfs.sh mkrootfs-image.sh build-bootimg.sh check-dts.sh validate.sh; do
     if grep -q "$s" .github/workflows/build.yml; then ok "$s"; else bad "$s not referenced"; fi
 done
+
+echo "== sparse-checkout must include include/uapi =="
+# include/dt-bindings/input/linux-event-codes.h is a symlink into include/uapi;
+# omitting it breaks the DTS preprocessor with a confusing error.
+if grep -q 'include/uapi' .github/workflows/build.yml; then
+    ok "include/uapi in sparse-checkout"
+else
+    bad "include/uapi missing from sparse-checkout (DTS preprocessing will fail)"
+fi
+
+echo "== check-dts.sh guards against the dangling symlink =="
+for pat in 'include/uapi' 'linux-event-codes.h' 'dangling symlink'; do
+    if grep -q "$pat" scripts/check-dts.sh; then ok "guard: $pat"; else bad "guard missing: $pat"; fi
+done
+
+echo "== user defaults =="
+if grep -q 'debian:debian' scripts/build-rootfs.sh; then ok "user debian/debian"; else bad "user debian/debian not set"; fi
+if grep -q '010-debian' scripts/build-rootfs.sh; then ok "sudoers for debian"; else bad "sudoers for debian missing"; fi
 
 echo
 if (( fail )); then echo "VALIDATION FAILED"; exit 1; fi
