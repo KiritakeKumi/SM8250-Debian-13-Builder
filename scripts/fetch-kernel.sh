@@ -24,27 +24,24 @@ set -euo pipefail
 : "${WORKSPACE:?WORKSPACE not set}"
 : "${KERNEL_VERSION:?KERNEL_VERSION not set}"
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 SRC_DIR="$WORKSPACE/src"
 KSRC="$SRC_DIR/linux-$KERNEL_VERSION"
 LOGDIR="$WORKSPACE/logs"
 mkdir -p "$SRC_DIR" "$LOGDIR"
 
 # ---------------------------------------------------------------------------
-# Work out the kernel.org paths.
+# Work out the kernel.org paths and the git ref.
 #
-# KERNEL_VERSION may be "7.2" (major.minor) or "6.18.35" (major.minor.patch).
-# kernel.org lays them out as:
-#   v7.x/linux-7.2.tar.xz          <- a .0 release, series dir is v7.x
-#   v7.x/linux-7.2.6.tar.xz        <- a stable update, still v7.x
-#   v6.x/linux-6.18.35.tar.xz      <- series dir is v6.x
-#   v6.18.x/linux-6.18.35.tar.xz   <- also valid
-#
-# So the series dir is always "v<major>.x" for the tarball, while the tag is
-# the full "v<version>".
+# The tag/repo resolution lives in scripts/resolve-kernel-ref.sh so that the
+# CI validate job and this script cannot drift apart. (They already did once:
+# the validate job used the naive ${VERSION%.*} form and produced the tag "v7"
+# for input "7.2", which does not exist.)
 # ---------------------------------------------------------------------------
-KMAJOR="${KERNEL_VERSION%%.*}"                       # 6 / 7
-series="v${KMAJOR}.x"                                # v7.x
-tag="v$KERNEL_VERSION"                               # v7.2 / v6.18.35
+eval "$(bash "$REPO_ROOT/scripts/resolve-kernel-ref.sh" "$KERNEL_VERSION" --format=env)"
+series="$KERNEL_SERIES"
+tag="$KERNEL_TAG"
 
 # The stable branch name differs: linux-7.x.y does not exist; the stable
 # branches are linux-6.18.y, linux-7.2.y, ... For a bare "7.2" the branch would
@@ -58,6 +55,7 @@ fi
 echo "kernel version:  $KERNEL_VERSION"
 echo "kernel.org dir:  $series"
 echo "git tag:         $tag"
+echo "git repo:        $KERNEL_REPO"
 echo "stable branch:   $stable_branch"
 
 # ---------------------------------------------------------------------------

@@ -364,6 +364,48 @@ else
     bad "no kernelrelease assertion"
 fi
 
+echo "== kernel tag resolution must be shared, not duplicated =="
+# The CI validate job used to inline  TAG="v${KVER%.*}"  which produced "v7"
+# for input "7.2" -> "fatal: couldn't find remote ref refs/tags/v7".
+if [[ -x scripts/resolve-kernel-ref.sh ]] || [[ -s scripts/resolve-kernel-ref.sh ]]; then
+    ok "scripts/resolve-kernel-ref.sh present"
+else
+    bad "scripts/resolve-kernel-ref.sh missing"
+fi
+if grep -q 'resolve-kernel-ref.sh' .github/workflows/build.yml; then
+    ok "workflow uses the shared resolver"
+else
+    bad "workflow does not use the shared resolver"
+fi
+if grep -q 'resolve-kernel-ref.sh' scripts/fetch-kernel.sh; then
+    ok "fetch-kernel.sh uses the shared resolver"
+else
+    bad "fetch-kernel.sh does not use the shared resolver"
+fi
+# the broken idiom must not appear as *code* anywhere. Comment lines are
+# excluded: resolve-kernel-ref.sh and validate.sh deliberately quote the old
+# form in their explanatory comments.
+fragile_hits=$(grep -rn 'TAG="v\${KVER%\.\*}"\|TAG="v\${KERNEL_VERSION%\.\*}"' \
+                   .github/workflows/build.yml scripts/ 2>/dev/null \
+               | grep -v ':[0-9]*: *#' || true)
+if [[ -n "$fragile_hits" ]]; then
+    bad "the fragile TAG=\"v\${VER%.*}\" idiom is still present:"
+    printf '        %s\n' "$fragile_hits"
+else
+    ok "no fragile TAG=\${VER%.*} idiom in executable code"
+fi
+# stable point releases live in gregkh/linux, not torvalds/linux
+if grep -q 'gregkh/linux' scripts/resolve-kernel-ref.sh; then
+    ok "resolver knows stable releases are in gregkh/linux"
+else
+    bad "resolver does not target gregkh/linux (stable tags would 404)"
+fi
+if grep -q 'resolve-kernel-ref' scripts/validate.sh; then
+    ok "validator covers the resolver"
+else
+    bad "validator does not mention the resolver"
+fi
+
 echo "== kernel.org paths must be derived correctly for 6.x and 7.x =="
 # ${VERSION%.*} on a bare "7.2" yields "7", which would give the wrong series
 # dir (v7.x instead of v7.2.x is fine for the tarball, but the *branch* name
@@ -373,16 +415,12 @@ if grep -q 'stable_branch=' scripts/fetch-kernel.sh; then
 else
     bad "fetch-kernel.sh has no stable_branch derivation"
 fi
-if grep -q 'KMAJOR=' scripts/fetch-kernel.sh; then
-    ok "fetch-kernel.sh derives the major version explicitly"
+# The series/tag now come from the shared resolver; assert it is wired in.
+if grep -q 'series="\$KERNEL_SERIES"' scripts/fetch-kernel.sh && \
+   grep -q 'tag="\$KERNEL_TAG"' scripts/fetch-kernel.sh; then
+    ok "fetch-kernel.sh takes series/tag from the resolver"
 else
-    bad "fetch-kernel.sh does not derive KMAJOR"
-fi
-# the fragile one-liner must be gone
-if grep -qE 'major_minor="\$\{KERNEL_VERSION%\.\*\}"' scripts/fetch-kernel.sh; then
-    bad "fetch-kernel.sh still uses the fragile \${VERSION%.*} idiom"
-else
-    ok "no fragile \${VERSION%.*} idiom"
+    bad "fetch-kernel.sh does not use the resolver's series/tag"
 fi
 
 echo "== 7.x awareness in build-kernel.sh =="

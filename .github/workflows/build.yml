@@ -101,12 +101,24 @@ jobs:
         run: |
           set -euo pipefail
           KVER="${{ inputs.kernel_version || '6.18.35' }}"
-          TAG="v${KVER%.*}"
+
+          # Resolve the tag + repo with the shared helper. Doing this inline
+          # used to be wrong for a bare "7.2": ${KVER%.*} stripped ".2" and
+          # produced the tag "v7", which does not exist:
+          #   fatal: couldn't find remote ref refs/tags/v7
+          # Stable point releases (6.18.35, 7.2.6) are also only tagged in
+          # gregkh/linux, not torvalds/linux.
+          eval "$(bash scripts/resolve-kernel-ref.sh "$KVER" --format=env)"
+          echo "version: $KVER"
+          echo "tag:     $KERNEL_TAG"
+          echo "repo:    $KERNEL_REPO"
+          echo "kind:    $KERNEL_KIND"
+
           DEST="$PWD/kdts"
           rm -rf "$DEST"; mkdir -p "$DEST"
           cd "$DEST"
           git init -q .
-          git remote add origin https://github.com/torvalds/linux.git
+          git remote add origin "$KERNEL_REPO"
           git config core.sparseCheckout true
           git sparse-checkout init --cone
           # NOTE: include/uapi is REQUIRED. include/dt-bindings/input/linux-event-codes.h
@@ -118,14 +130,51 @@ jobs:
               include/uapi \
               arch/arm64/boot/dts/qcom \
               scripts/dtc/include-prefixes
-          # github can be flaky; retry
-          for i in 1 2 3 4 5; do
-            if git fetch --depth 1 --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"; then break; fi
-            echo "fetch attempt $i failed, retrying..."
+
+          # github can be flaky; retry, then fall back to torvalds/linux
+          fetched=0
+          for attempt in 1 2 3 4 5; do
+            if git fetch --depth 1 --no-tags \
+                 origin "refs/tags/$KERNEL_TAG:refs/tags/$KERNEL_TAG" 2>&1; then
+              fetched=1
+              break
+            fi
+            echo "fetch attempt $attempt failed, retrying..."
             sleep 15
           done
-          git checkout -q "$TAG"
 
+          if [[ $fetched -ne 1 ]]; then
+            echo "could not fetch $KERNEL_TAG from $KERNEL_REPO"
+            echo "trying torvalds/linux as a fallback..."
+            git remote set-url origin https://github.com/torvalds/linux.git
+            for attempt in 1 2 3 4 5; do
+              if git fetch --depth 1 --no-tags \
+                   origin "refs/tags/$KERNEL_TAG:refs/tags/$KERNEL_TAG" 2>&1; then
+                fetched=1
+                break
+              fi
+              echo "fallback attempt $attempt failed, retrying..."
+              sleep 15
+            done
+          fi
+
+          if [[ $fetched -ne 1 ]]; then
+            cat >&2 <<EOF
+          ERROR: tag $KERNEL_TAG not found in either repo.
+
+          Tried:
+            $KERNEL_REPO
+            https://github.com/torvalds/linux.git
+
+          Check that the version exists:
+            https://cdn.kernel.org/pub/linux/kernel/$KERNEL_SERIES/
+          EOF
+            exit 1
+          fi
+
+          git checkout -q "refs/tags/$KERNEL_TAG"
+
+          echo "checked out: $(git describe --tags 2>/dev/null || echo "$KERNEL_TAG")"
           echo "dt-bindings headers: $(find include/dt-bindings -name '*.h' | wc -l)"
           echo "uapi headers:        $(find include/uapi -name '*.h' | wc -l)"
           echo "qcom dtsi files:     $(ls arch/arm64/boot/dts/qcom/*.dtsi | wc -l)"
