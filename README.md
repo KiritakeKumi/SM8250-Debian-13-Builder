@@ -177,9 +177,29 @@ nico-debian-sm8250-trixie.rootfs.img
 - 未验证：休眠/唤醒、冷启动多次循环、真实网络吞吐。
 - `rtl_nic/rtl8168h-2.fw` 缺失会导致 RTL8168 只能跑到降级速率（不影响连通）。
 - 本仓库不包含任何厂商固件/引导链（xbl、abl、tz、hyp 等），那些需要用底包单独刷。
+- **7.x 内核还没在真机上启动验证过**（只验证了能编译、API 齐全、配置项都在）。
+
+## 致谢
+
+**本仓库打包的板级支持代码来自别人的工作，不是我们写的。** 详见
+[`CREDITS.md`](CREDITS.md)，摘要：
+
+| 来源 | 内容 | 许可 |
+| --- | --- | --- |
+| [**Evsio0n/tc-eb5-oot**](https://github.com/evsio0n/tc-eb5-oot) v0.2.1 | `modules/tc-eb5/` 的两个模块 + `dts/patches/nic-fix-overlay.dtsi` | GPL-2.0-only / BSD-3-Clause |
+| [**armbian/build**](https://github.com/armbian/build) | 设备树 `qcs8250-dg-svr-865-tiny.dts`（维护者 FantasyGmm） | BSD-3-Clause |
+| 实际部署的板子 | `config/kernel-base.config`（从 `/proc/config.gz` 导出） | GPL-2.0 |
+| [ztelliot 的 gist](https://gist.github.com/ztelliot/d8962d106da85d56176b463c47add079) | EL2/KVM + DSP 支持方案（**参考，未并入**） | — |
+
+**特别感谢 Evsio0n** —— 这块板子上 ASM2806 + 双 RTL8168 能用，靠的就是
+`tc-eb5-oot` 那套 GPIO 时序和 PERST provider。本仓库只是把它接进了一条
+自动构建流水线。上游的实测结论（Gen3 x2、AER 零、DHCP + SSH 跑通）见
+`CREDITS.md`。
 
 ## 许可
 
-- 本仓库脚本：GPL-3.0（见 `LICENSE`）
-- `modules/tc-eb5/` 内的树外模块：GPL-2.0-only（各自文件头有声明）
-- `dts/` 下的设备树：BSD-3-Clause（文件头有声明）
+- 本仓库脚本、workflow：GPL-3.0（见 `LICENSE`）
+- `modules/tc-eb5/` 内的树外模块：GPL-2.0-only（来自 Evsio0n/tc-eb5-oot）
+- `dts/nico-debian-sm8250.dts`：BSD-3-Clause（来自 armbian/build）
+- `dts/patches/nic-fix-overlay.dtsi`：BSD-3-Clause（派生自 tc-eb5.dts）
+- `scripts/mkbootimg.py`：GPL-3.0（本仓库原创，格式参考 AOSP mkbootimg）

@@ -8,6 +8,12 @@
  * GPIO provider; the *unmodified* mainline qcom-pcie driver consumes it. No
  * kernel source patch is involved.
  *
+ * Derived from the PCIe1 / sequencer / pinctrl parts of
+ *   Evsio0n/tc-eb5-oot v0.2.1, dts/tc-eb5.dts
+ *   https://github.com/evsio0n/tc-eb5-oot
+ * rewritten as an overlay that is appended to the Armbian-maintained mainline
+ * device tree instead of being a standalone board DTS. See CREDITS.md.
+ *
  * SPDX-License-Identifier: BSD-3-Clause
  */
 

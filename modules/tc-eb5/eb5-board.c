@@ -1,5 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* TC-EB5 board GPIO sequencer and PERST provider for the stock PCIe driver. */
+/*
+ * TC-EB5 board GPIO sequencer and PERST provider for the stock PCIe driver.
+ *
+ * From Evsio0n/tc-eb5-oot v0.2.1:
+ *   https://github.com/evsio0n/tc-eb5-oot
+ *   (modules/eb5-board.c)
+ *
+ * Local change vs upstream: gpio_chip::set returns int, matching the gpiolib
+ * change in Linux 6.15 ("gpiolib: allow set() to fail").
+ *
+ * See CREDITS.md for the full attribution and the upstream test results.
+ */
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>

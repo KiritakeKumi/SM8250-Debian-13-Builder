@@ -1,5 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Hold only the two EB5 RTL8168 probes until the native PCIe host is bound. */
+/*
+ * Hold only the two EB5 RTL8168 probes until the native PCIe host is bound.
+ *
+ * From Evsio0n/tc-eb5-oot v0.2.1:
+ *   https://github.com/evsio0n/tc-eb5-oot
+ *   (modules/eb5-bind-gate.c)
+ *
+ * This is the piece that keeps r8169 from probing before the native qcom-pcie
+ * host has finished, which is what removes the async-probe request_module
+ * warning and the v0.2.0 Oops.
+ *
+ * See CREDITS.md for the full attribution and the upstream test results.
+ */
 #include <linux/async.h>
 #include <linux/device.h>
 #include <linux/jiffies.h>

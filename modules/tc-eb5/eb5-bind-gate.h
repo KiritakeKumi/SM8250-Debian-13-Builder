@@ -1,4 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * From Evsio0n/tc-eb5-oot v0.2.1:
+ *   https://github.com/evsio0n/tc-eb5-oot
+ *   (modules/eb5-bind-gate.h)
+ * See CREDITS.md.
+ */
 #ifndef EB5_BIND_GATE_H
 #define EB5_BIND_GATE_H
 

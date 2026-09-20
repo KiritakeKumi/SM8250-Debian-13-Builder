@@ -232,6 +232,34 @@ for pat in 'header_version' '0x8000' '0x1000000' '0x100' '4096'; do
     fi
 done
 
+echo "== attribution must be present =="
+# The board support code is not ours; CREDITS.md must exist and the files that
+# came from elsewhere must say so.
+if [[ -s CREDITS.md ]]; then
+    ok "CREDITS.md present"
+else
+    bad "CREDITS.md missing"
+fi
+if grep -q 'evsio0n/tc-eb5-oot' CREDITS.md; then
+    ok "CREDITS.md names Evsio0n/tc-eb5-oot"
+else
+    bad "CREDITS.md does not credit Evsio0n/tc-eb5-oot"
+fi
+if grep -q 'Evsio0n/tc-eb5-oot' README.md; then
+    ok "README links to the credits"
+else
+    bad "README does not mention the upstream project"
+fi
+for f in modules/tc-eb5/eb5-board.c modules/tc-eb5/eb5-bind-gate.c \
+         modules/tc-eb5/eb5-bind-gate.h modules/tc-eb5/Makefile \
+         dts/patches/nic-fix-overlay.dtsi; do
+    if grep -q 'Evsio0n/tc-eb5-oot' "$f"; then
+        ok "$f carries attribution"
+    else
+        bad "$f is missing attribution"
+    fi
+done
+
 echo "== scripts that need root must self-elevate =="
 # debootstrap/chroot (build-rootfs.sh) and loop mount + mkfs (mkrootfs-image.sh)
 # need root. In CI the runner has passwordless sudo, so they re-exec themselves.

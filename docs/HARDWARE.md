@@ -65,6 +65,10 @@ GPIO  126  : high, 保持 120ms
 
 `modules/tc-eb5/` 里有两个**树外模块**，不改任何内核源码：
 
+> 这两个模块来自 [Evsio0n/tc-eb5-oot](https://github.com/evsio0n/tc-eb5-oot) v0.2.1
+> （GPL-2.0-only）。本仓库只做了最小改动以适配 6.18/7.x 内核。
+> 完整的来源、许可与上游实测数据见 [`CREDITS.md`](../CREDITS.md)。
+
 1. **`tc-eb5-pcie-helper`**
    - 按上面顺序驱动 GPIO 82/88/89/121/127/126；
    - 把 PERST 暴露成一个 **GPIO provider**（`gpio-controller`）；
