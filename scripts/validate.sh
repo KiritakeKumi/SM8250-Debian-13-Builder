@@ -260,6 +260,66 @@ for f in modules/tc-eb5/eb5-board.c modules/tc-eb5/eb5-bind-gate.c \
     fi
 done
 
+echo "== release assets must fit GitHub's 2 GiB per-file limit =="
+# A 6000 MiB rootfs image is far past the limit; the release job must ship the
+# gzipped form and never glob dist/** (which would also sweep in build logs).
+if grep -q 'gzip -9 -k -f' .github/workflows/build.yml; then
+    ok "rootfs is gzipped before release"
+else
+    bad "rootfs is not gzipped (will exceed the 2 GiB release limit)"
+fi
+if grep -qE 'files:\s*dist/\*\*' .github/workflows/build.yml; then
+    bad "publish uses dist/** (sweeps the raw .img and build logs)"
+else
+    ok "publish does not glob dist/**"
+fi
+if grep -qE 'files:\s*release/\*' .github/workflows/build.yml; then
+    ok "publish uses an explicit release/* directory"
+else
+    bad "publish does not use release/*"
+fi
+if grep -q 'RELEASE-ASSETS.txt' .github/workflows/build.yml; then
+    ok "release uses a RELEASE-ASSETS.txt allowlist"
+else
+    bad "no release asset allowlist"
+fi
+if grep -qE '2 \* 1024 \* 1024 \* 1024|2147483648' .github/workflows/build.yml; then
+    ok "workflow guards against the 2 GiB limit"
+else
+    bad "no 2 GiB guard"
+fi
+if grep -q 'rootfs-artifact' .github/workflows/build.yml; then
+    ok "rootfs artifact is downloaded separately from boot images"
+else
+    bad "rootfs artifact is merged into the release download"
+fi
+
+echo "== the release job must define its own artifact-name env =="
+# `env` is per-job. Referencing env.KERNEL_VERSION in the release job without
+# defining it silently produces artifact names like "-nic".
+release_block=$(sed -n '/^  release:/,$p' .github/workflows/build.yml)
+if printf '%s' "$release_block" | grep -q 'KERNEL_VERSION:'; then
+    ok "release job defines KERNEL_VERSION"
+else
+    bad "release job does not define KERNEL_VERSION"
+fi
+if printf '%s' "$release_block" | grep -q 'DTB_SOURCE:'; then
+    ok "release job defines DTB_SOURCE"
+else
+    bad "release job does not define DTB_SOURCE"
+fi
+if printf '%s' "$release_block" | grep -q 'needs.build.outputs'; then
+    bad "release job reads build outputs that the build job does not declare"
+else
+    ok "release job resolves its options locally"
+fi
+n_tag=$(grep -c 'name: Resolve release tag' .github/workflows/build.yml)
+if [[ "$n_tag" == "1" ]]; then
+    ok "exactly one tag-resolution step"
+else
+    bad "$n_tag tag-resolution steps (expected 1)"
+fi
+
 echo "== scripts that need root must self-elevate =="
 # debootstrap/chroot (build-rootfs.sh) and loop mount + mkfs (mkrootfs-image.sh)
 # need root. In CI the runner has passwordless sudo, so they re-exec themselves.

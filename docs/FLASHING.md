@@ -19,6 +19,14 @@
 
 ---
 
+> **从 GitHub Release 下载的话，rootfs 是 `.img.gz`，先解压**：
+>
+> ```bash
+> gunzip -k nico-debian-sm8250-trixie.rootfs.img.gz
+> ```
+>
+> Release 单个附件上限 2 GiB，所以只能放压缩版；原始 `.img` 在 Actions artifact 里。
+
 ## 1. 刷 rootfs
 
 ```bash

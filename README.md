@@ -54,6 +54,36 @@ GitHub 的 **arm64 runner 只有 14 GB 磁盘**（`ubuntu-24.04-arm`）。本流
 | `make_default_user` | `true` | 创建普通用户 `debian`（密码 `debian`），并加入 sudo |
 | `publish_release` | `false` | 手动触发时是否发布 release（push 触发时总是发布） |
 
+### 产物在哪
+
+同一次构建会产出两份东西，用途不同：
+
+| 位置 | 内容 | 大小限制 |
+| --- | --- | --- |
+| **Actions Artifacts** | 原始 `.rootfs.img` + `.boot.img` + `.img.gz` | 无单文件限制 |
+| **GitHub Release** | `.boot.img` + `.boot-recovery.img` + `.rootfs.img.gz` | **单个文件 < 2 GiB** |
+
+**为什么 release 里是 `.img.gz` 而不是 `.img`**：GitHub Release 的单个附件硬上限是
+**2 GiB**，而 6000 MiB 的 ext4 镜像远超这个值（即使镜像里大部分是零）。压缩后
+大约 1.5–2 GB，能放进去。Armbian 官方的 rootfs 镜像也是这么发的
+（4.8 GB 的 `.img` → 1.6 GB 的 `.tar.gz`）。
+
+用法：
+
+```bash
+gunzip -k nico-debian-sm8250-trixie.rootfs.img.gz
+fastboot flash rootfs nico-debian-sm8250-trixie.rootfs.img
+```
+
+`SHA256SUMS` 里同时有 `.img` 和 `.img.gz` 两个哈希，校验压缩包用：
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+如果压缩后仍然超过 2 GiB，构建会**明确报错**而不是让 release 静默失败 ——
+把 `rootfs_size_mb` 调小即可。
+
 ### 关于 7.x 内核
 
 `kernel_version` 填 `7.2` / `7.2.6` / `7.0` 等都可以。已验证过：

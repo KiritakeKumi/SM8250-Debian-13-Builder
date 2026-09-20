@@ -316,11 +316,43 @@ jobs:
       - name: Pack Android boot images
         run: bash scripts/build-bootimg.sh
 
+      - name: Compress the rootfs image for release
+        run: |
+          set -euo pipefail
+          cd "$OUTDIR"
+          # GitHub Releases cap a single asset at 2 GiB, and a 6000 MiB ext4
+          # image is far past that. The image is mostly zeros, so gzip brings it
+          # well under the limit (the Armbian rootfs images do the same: a
+          # ~4.8 GB .img becomes a ~1.6 GB .tar.gz).
+          #
+          # We ship BOTH:
+          #   *.rootfs.img     -> Actions artifact (no size cap, easy to use)
+          #   *.rootfs.img.gz  -> release asset (under 2 GiB)
+          for img in *.rootfs.img; do
+            echo "compressing $img ($(du -h "$img" | cut -f1))"
+            gzip -9 -k -f "$img"
+            ls -lh "$img" "$img.gz"
+          done
+
+          # refuse to publish anything that would fail the release upload
+          LIMIT=$(( 2 * 1024 * 1024 * 1024 - 1024 * 1024 ))   # 2 GiB minus slack
+          fail=0
+          for f in *.img.gz; do
+            sz=$(stat -c%s "$f")
+            if (( sz >= LIMIT )); then
+              echo "ERROR: $f is $(( sz / 1024 / 1024 )) MiB, over the 2 GiB release limit" >&2
+              echo "       Lower rootfs_size_mb, or publish via Actions artifacts only." >&2
+              fail=1
+            fi
+          done
+          (( fail )) && exit 1
+          echo "all release assets are under the 2 GiB limit"
+
       - name: Generate checksums and manifest
         run: |
           set -euo pipefail
           cd "$OUTDIR"
-          sha256sum *.img > SHA256SUMS
+          sha256sum *.img *.img.gz > SHA256SUMS
           cat > MANIFEST.txt <<EOF
           image_name:      ${IMAGE_NAME}
           kernel_version:  $KERNEL_VERSION
@@ -339,6 +371,18 @@ jobs:
           ls -lh
           cat MANIFEST.txt
 
+          # a small file that lists exactly what goes into the release, so the
+          # release job never picks up build logs by accident
+          cat > RELEASE-ASSETS.txt <<EOF
+          ${IMAGE_NAME}-${RELEASE_NAME}.boot.img
+          ${IMAGE_NAME}-${RELEASE_NAME}.boot-recovery.img
+          ${IMAGE_NAME}-${RELEASE_NAME}.rootfs.img.gz
+          SHA256SUMS
+          MANIFEST.txt
+          EOF
+          echo "---- release assets ----"
+          cat RELEASE-ASSETS.txt
+
       - name: Upload boot images
         uses: actions/upload-artifact@v4
         with:
@@ -348,6 +392,7 @@ jobs:
             work/out/*.boot-recovery.img
             work/out/SHA256SUMS
             work/out/MANIFEST.txt
+            work/out/RELEASE-ASSETS.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
@@ -358,8 +403,10 @@ jobs:
           name: rootfs-image-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-nic${{ env.WITH_NIC_FIX }}
           path: |
             work/out/*.rootfs.img
+            work/out/*.rootfs.img.gz
           if-no-files-found: error
-          compression-level: 6
+          # the .gz is already compressed; don't waste time re-compressing
+          compression-level: 0
           retention-days: 30
 
       - name: Upload build logs
@@ -379,18 +426,35 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
 
+    # The artifact names embed these, so they must be set here too. `env` is
+    # per-job in GitHub Actions, not workflow-wide.
+    #
+    # WITH_NIC_FIX is resolved the same way the build job does it: the inline
+    # `inputs.x == false && ... || ...` idiom is wrong on push events (where
+    # `inputs` is empty and `null == false` is true), which is what produced
+    # artifact names like "...-nicfalse".
+    env:
+      KERNEL_VERSION: ${{ inputs.kernel_version || '6.18.35' }}
+      DTB_SOURCE: ${{ inputs.dtb_source || 'upstream-armbian' }}
+
+    steps:
+      - name: Resolve artifact suffix
+        id: opts
+        run: |
+          set -euo pipefail
+          nic=true
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            [[ "${{ inputs.with_nic_fix }}" == "false" ]] && nic=false
+          fi
+          echo "WITH_NIC_FIX=$nic" >> "$GITHUB_ENV"
+          echo "with_nic_fix=$nic" >> "$GITHUB_OUTPUT"
+          echo "artifact suffix: nic$nic"
+
+      # Decide first, so a manual run without publish_release=true does no work.
       - name: Resolve release tag
         id: rel
         env:
-          KVER: ${{ inputs.kernel_version || '6.18.35' }}
-          DTB:  ${{ inputs.dtb_source || 'upstream-armbian' }}
           EVENT: ${{ github.event_name }}
           PUBLISH: ${{ inputs.publish_release }}
           RUN: ${{ github.run_number }}
@@ -403,25 +467,84 @@ jobs:
             exit 0
           fi
           if [[ "$EVENT" == "workflow_dispatch" ]]; then
-            TAG="${KVER}-${DTB}-r${RUN}"
+            TAG="${KERNEL_VERSION}-${DTB_SOURCE}-r${RUN}"
           else
             # push: date + run number keeps tags unique and sortable
-            TAG="${KVER}-${DTB}-$(date -u +%Y%m%d)-r${RUN}"
+            TAG="${KERNEL_VERSION}-${DTB_SOURCE}-$(date -u +%Y%m%d)-r${RUN}"
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "will publish as: $TAG"
 
+      # NOTE: only the boot-images artifact is downloaded here. The rootfs image
+      # artifact holds both the raw .img (up to ROOTFS_SIZE_MB, way past the
+      # 2 GiB per-asset release limit) and the .gz. Downloading the whole
+      # artifact and globbing dist/** would try to upload the raw .img too --
+      # which is exactly what failed before with
+      #   "size must be less than 2147483648".
+      - name: Download boot images
+        if: steps.rel.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: boot-images-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-nic${{ env.WITH_NIC_FIX }}
+          path: dist
+
+      - name: Download compressed rootfs
+        if: steps.rel.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: rootfs-image-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-nic${{ env.WITH_NIC_FIX }}
+          path: rootfs-artifact
+
+      - name: Assemble release assets
+        if: steps.rel.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          # keep only what RELEASE-ASSETS.txt lists
+          if [[ -f dist/RELEASE-ASSETS.txt ]]; then
+            mkdir -p release
+            while read -r f; do
+              [[ -z "$f" ]] && continue
+              if [[ -f "dist/$f" ]]; then
+                cp "dist/$f" release/
+              elif [[ -f "rootfs-artifact/$f" ]]; then
+                cp "rootfs-artifact/$f" release/
+              else
+                echo "ERROR: release asset '$f' not found in either artifact" >&2
+                exit 1
+              fi
+            done < dist/RELEASE-ASSETS.txt
+          else
+            echo "no RELEASE-ASSETS.txt; falling back to a safe glob" >&2
+            mkdir -p release
+            cp dist/*.boot.img dist/*.boot-recovery.img \
+               dist/SHA256SUMS dist/MANIFEST.txt release/ 2>/dev/null || true
+            cp rootfs-artifact/*.rootfs.img.gz release/ 2>/dev/null || true
+          fi
+
+          echo "---- release payload ----"
+          ls -lh release/
+          # hard guard: GitHub rejects any asset >= 2 GiB
+          fail=0
+          for f in release/*; do
+            sz=$(stat -c%s "$f")
+            if (( sz >= 2 * 1024 * 1024 * 1024 )); then
+              echo "ERROR: $f is $(( sz / 1024 / 1024 )) MiB, over the 2 GiB limit" >&2
+              fail=1
+            fi
+          done
+          (( fail )) && exit 1
+          echo "all assets are under 2 GiB"
+
       - name: Build release notes
         if: steps.rel.outputs.publish == 'true'
         run: |
           set -euo pipefail
-          ls -lh dist/
           {
             echo "自动构建的 Debian 13 系统镜像。"
             echo
             echo '```'
-            cat dist/MANIFEST.txt 2>/dev/null || echo "(no manifest)"
+            cat release/MANIFEST.txt 2>/dev/null || echo "(no manifest)"
             echo '```'
             echo
             echo "## 产物"
@@ -430,19 +553,26 @@ jobs:
             echo '| --- | --- | --- |'
             echo '| `*.boot.img` | Android boot image（内核 + DTB + initramfs） | `fastboot flash boot <file>` |'
             echo '| `*.boot-recovery.img` | 同上，备用槽 | `fastboot flash boot <file>` |'
-            echo '| `*.rootfs.img` | ext4 根文件系统 | `fastboot flash rootfs <file>` |'
+            echo '| `*.rootfs.img.gz` | ext4 根文件系统（**gzip 压缩，先解压**） | `fastboot flash rootfs <file>` |'
+            echo
+            echo "> GitHub Release 单个附件上限是 2 GiB，所以 rootfs 以 \`.img.gz\` 形式提供。"
+            echo "> 解压：\`gunzip -k <*.rootfs.img.gz>\`。未压缩的 \`.img\` 在 Actions artifact 里。"
             echo
             echo "## 校验"
             echo
             echo '```'
-            cat dist/SHA256SUMS 2>/dev/null || echo "(no checksums)"
+            cat release/SHA256SUMS 2>/dev/null || echo "(no checksums)"
             echo '```'
+            echo
+            echo "> \`SHA256SUMS\` 同时包含解压后的 \`.img\` 和 \`.img.gz\` 的哈希。"
+            echo "> 校验压缩包：\`sha256sum -c SHA256SUMS --ignore-missing\`"
             echo
             echo "## 刷机"
             echo
             echo '```bash'
-            echo 'fastboot flash rootfs <*.rootfs.img>'
-            echo 'fastboot flash boot   <*.boot.img>'
+            echo 'gunzip -k nico-debian-sm8250-trixie.rootfs.img.gz'
+            echo 'fastboot flash rootfs nico-debian-sm8250-trixie.rootfs.img'
+            echo 'fastboot flash boot   nico-debian-sm8250-trixie.boot.img'
             echo 'fastboot reboot'
             echo '```'
             echo
@@ -457,7 +587,9 @@ jobs:
           tag_name: ${{ steps.rel.outputs.tag }}
           name: "Debian 13 for DG-SVR-865-TINY (${{ inputs.kernel_version || '6.18.35' }}, ${{ inputs.dtb_source || 'upstream-armbian' }})"
           body_path: release-notes.md
-          files: dist/**
+          # explicit directory, NOT dist/** -- dist would also sweep in the raw
+          # rootfs .img (over the 2 GiB per-asset limit) and any build logs.
+          files: release/*
           draft: false
           prerelease: true
           make_latest: false
