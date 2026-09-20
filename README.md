@@ -43,8 +43,8 @@ GitHub 的 **arm64 runner 只有 14 GB 磁盘**（`ubuntu-24.04-arm`）。本流
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `kernel_version` | `6.18.35` | 内核版本，取 kernel.org 的 tarball。可选 `6.18.52` / `6.12.110` 等 |
-| `dtb_source` | `upstream-armbian` | 设备树来源：`upstream-armbian`（官方主线 DT）/ `upstream-vendor-dg`（厂商风格 DG DT）/ `custom`（用 `dts/` 目录里你自己放的文件） |
+| `kernel_version` | `6.18.35` | 内核版本，取 kernel.org 的 tarball。**支持 7.x**，见下方说明 |
+| `dtb_source` | `upstream-armbian` | 设备树来源：`upstream-armbian`（官方主线 DT）/ `upstream-vendor-dg`（本地快照）/ `custom`（`dts/custom/`） |
 | `with_nic_fix` | `true` | 是否编译并安装树外网卡修复模块（ASM2806 + 双 RTL8168 枚举） |
 | `rootfs_size_mb` | `6000` | rootfs 镜像大小（MiB）。必须 ≥ 板子 rootfs 分区实际大小 |
 | `hostname` | `nico-sm8250` | 目标机主机名 |
@@ -52,6 +52,24 @@ GitHub 的 **arm64 runner 只有 14 GB 磁盘**（`ubuntu-24.04-arm`）。本流
 | `enable_ssh` | `true` | 是否开启 sshd |
 | `extra_packages` | 空 | 额外要装的包，空格分隔 |
 | `make_default_user` | `true` | 创建普通用户 `debian`（密码 `debian`），并加入 sudo |
+| `publish_release` | `false` | 手动触发时是否发布 release（push 触发时总是发布） |
+
+### 关于 7.x 内核
+
+`kernel_version` 填 `7.2` / `7.2.6` / `7.0` 等都可以。已验证过：
+
+- 模块用到的 **60 个内核 API 在 7.2 上全部存在**
+- `device_has_driver_override()` 在 7.0+ 原生就有（6.18 是靠 backport）
+- `struct pci_dev.driver_override` 在 7.1 被移除 —— 我们的代码没用它，只用通用 helper
+- 设备树在 7.2 头文件下**实际编译通过**（123058 字节，所有节点完整）
+- 内核配置项在 7.2 上全部存在
+
+**注意**：Armbian 只在 `sm8250-6.12` 和 `sm8250-6.18` 目录里带这块板的 DT，
+没有 7.x 版本。所以 7.x 构建时 `fetch-dts.sh` 会自动回退到仓库内的快照
+（`dts/nico-debian-sm8250.dts`），这份快照已验证能在 7.2 上编译。
+
+> 7.x 的内核**还没在真机上启动验证过**。首次测试建议用
+> `fastboot boot`（RAM boot）而不是刷写，这样出问题不影响现有系统。
 
 ---
 

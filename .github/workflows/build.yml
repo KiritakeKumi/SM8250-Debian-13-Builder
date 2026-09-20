@@ -1,6 +1,7 @@
 name: Build Debian 13 Image
 
-# 手动触发，按需选择内核版本 / 设备树来源 / 是否带网卡修复
+# 手动触发，按需选择内核版本 / 设备树来源 / 是否带网卡修复；
+# 推送到 main 时也会自动构建并发布 release。
 on:
   workflow_dispatch:
     inputs:
@@ -49,7 +50,7 @@ on:
         default: ""
         type: string
       make_default_user:
-        description: "Create a normal user (dg) with sudo"
+        description: "Create a normal user (debian) with sudo"
         required: true
         default: true
         type: boolean
@@ -73,17 +74,17 @@ on:
       - "scripts/**"
 
 concurrency:
-  group: build-${{ github.ref }}-${{ github.event.inputs.kernel_version || 'default' }}
+  group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  # Cheap first gate: make sure the DTS + overlay actually compiles before we
-  # spend an hour building a kernel.
-  validate-dts:
-    name: Validate device tree
+  # Cheap first gate: make sure the DTS + overlay actually compiles, and that
+  # the boot image packer is correct, before we spend an hour building a kernel.
+  validate:
+    name: Validate device tree and tooling
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -161,7 +162,7 @@ jobs:
 
   build:
     name: Build (${{ inputs.kernel_version || '6.18.35' }} / ${{ inputs.dtb_source || 'upstream-armbian' }})
-    needs: validate-dts
+    needs: validate
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 350
 
@@ -170,18 +171,21 @@ jobs:
       OUTDIR: ${{ github.workspace }}/work/out
       KERNEL_VERSION: ${{ inputs.kernel_version || '6.18.35' }}
       DTB_SOURCE: ${{ inputs.dtb_source || 'upstream-armbian' }}
-      WITH_NIC_FIX: ${{ inputs.with_nic_fix == false && 'false' || 'true' }}
       ROOTFS_SIZE_MB: ${{ inputs.rootfs_size_mb || '6000' }}
       TARGET_HOSTNAME: ${{ inputs.hostname || 'nico-sm8250' }}
       TARGET_ROOT_PASSWORD: ${{ inputs.root_password || 'root' }}
-      TARGET_ENABLE_SSH: ${{ inputs.enable_ssh == false && 'false' || 'true' }}
       TARGET_EXTRA_PACKAGES: ${{ inputs.extra_packages || '' }}
-      TARGET_MAKE_USER: ${{ inputs.make_default_user == false && 'false' || 'true' }}
       RELEASE_NAME: ${{ inputs.build_release_name || 'trixie' }}
       DEBIAN_SUITE: trixie
       DEBIAN_MIRROR: http://deb.debian.org/debian
       DEBIAN_SECURITY_MIRROR: http://security.debian.org/debian-security
       SOURCE_DATE_EPOCH: "1700000000"
+      # NOTE: the boolean options (with_nic_fix / enable_ssh / make_default_user)
+      # are NOT resolved here. On push events `inputs` is empty, and the idiom
+      #   ${{ inputs.x == false && 'false' || 'true' }}
+      # evaluates to 'false' in that case (null == false is true in GH
+      # expressions), which silently disabled the NIC fix. They are resolved in
+      # the "Resolve build options" step below instead.
 
     steps:
       - name: Checkout
@@ -193,6 +197,24 @@ jobs:
       # aborts with "E: Unable to locate package" and the step fails.
       - name: Free disk space
         run: bash scripts/free-disk-space.sh
+
+      - name: Resolve build options
+        run: |
+          set -euo pipefail
+          # Defaults, used for push events where there are no inputs.
+          nic=true; ssh=true; usr=true
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # `inputs.X` renders as the literal string 'true'/'false' here.
+            [[ "${{ inputs.with_nic_fix }}"     == "false" ]] && nic=false
+            [[ "${{ inputs.enable_ssh }}"       == "false" ]] && ssh=false
+            [[ "${{ inputs.make_default_user }}" == "false" ]] && usr=false
+          fi
+          {
+            echo "WITH_NIC_FIX=$nic"
+            echo "TARGET_ENABLE_SSH=$ssh"
+            echo "TARGET_MAKE_USER=$usr"
+          } | tee -a "$GITHUB_ENV"
+          echo "resolved: nic_fix=$nic ssh=$ssh default_user=$usr"
 
       - name: Show runner info
         run: |
@@ -306,7 +328,12 @@ jobs:
           with_nic_fix:    $WITH_NIC_FIX
           rootfs_size_mb:  $ROOTFS_SIZE_MB
           release:         $RELEASE_NAME
+          target_hostname: $TARGET_HOSTNAME
+          enable_ssh:      $TARGET_ENABLE_SSH
+          default_user:    $TARGET_MAKE_USER
           git_sha:         $GITHUB_SHA
+          git_ref:         $GITHUB_REF_NAME
+          run_number:      $GITHUB_RUN_NUMBER
           build_date_utc:  $(date -u +%Y-%m-%dT%H:%M:%SZ)
           EOF
           ls -lh
@@ -348,19 +375,89 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_release == 'true'
+    if: needs.build.result == 'success'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: Resolve release tag
+        id: rel
+        env:
+          KVER: ${{ inputs.kernel_version || '6.18.35' }}
+          DTB:  ${{ inputs.dtb_source || 'upstream-armbian' }}
+          EVENT: ${{ github.event_name }}
+          PUBLISH: ${{ inputs.publish_release }}
+          RUN: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          # A manual run only publishes when explicitly asked to.
+          if [[ "$EVENT" == "workflow_dispatch" && "$PUBLISH" != "true" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "manual run without publish_release=true -> not publishing"
+            exit 0
+          fi
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            TAG="${KVER}-${DTB}-r${RUN}"
+          else
+            # push: date + run number keeps tags unique and sortable
+            TAG="${KVER}-${DTB}-$(date -u +%Y%m%d)-r${RUN}"
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "will publish as: $TAG"
+
+      - name: Build release notes
+        if: steps.rel.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          ls -lh dist/
+          {
+            echo "自动构建的 Debian 13 系统镜像。"
+            echo
+            echo '```'
+            cat dist/MANIFEST.txt 2>/dev/null || echo "(no manifest)"
+            echo '```'
+            echo
+            echo "## 产物"
+            echo
+            echo '| 文件 | 用途 | 刷写命令 |'
+            echo '| --- | --- | --- |'
+            echo '| `*.boot.img` | Android boot image（内核 + DTB + initramfs） | `fastboot flash boot <file>` |'
+            echo '| `*.boot-recovery.img` | 同上，备用槽 | `fastboot flash boot <file>` |'
+            echo '| `*.rootfs.img` | ext4 根文件系统 | `fastboot flash rootfs <file>` |'
+            echo
+            echo "## 校验"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS 2>/dev/null || echo "(no checksums)"
+            echo '```'
+            echo
+            echo "## 刷机"
+            echo
+            echo '```bash'
+            echo 'fastboot flash rootfs <*.rootfs.img>'
+            echo 'fastboot flash boot   <*.boot.img>'
+            echo 'fastboot reboot'
+            echo '```'
+            echo
+            echo "详见仓库里的 \`docs/FLASHING.md\`。"
+          } > release-notes.md
+          cat release-notes.md
+
       - name: Publish
+        if: steps.rel.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.kernel_version }}-${{ inputs.dtb_source }}-${{ github.run_number }}
-          name: "Debian 13 for nico-debian-sm8250 (${{ inputs.kernel_version }}, ${{ inputs.dtb_source }})"
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: "Debian 13 for DG-SVR-865-TINY (${{ inputs.kernel_version || '6.18.35' }}, ${{ inputs.dtb_source || 'upstream-armbian' }})"
+          body_path: release-notes.md
           files: dist/**
           draft: false
           prerelease: true
+          make_latest: false

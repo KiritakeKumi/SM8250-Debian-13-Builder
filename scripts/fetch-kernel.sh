@@ -29,9 +29,36 @@ KSRC="$SRC_DIR/linux-$KERNEL_VERSION"
 LOGDIR="$WORKSPACE/logs"
 mkdir -p "$SRC_DIR" "$LOGDIR"
 
-major_minor="${KERNEL_VERSION%.*}"          # 6.18.35 -> 6.18
-series="v${major_minor}.x"                  # v6.18.x
-tag="v$KERNEL_VERSION"                      # v6.18.35
+# ---------------------------------------------------------------------------
+# Work out the kernel.org paths.
+#
+# KERNEL_VERSION may be "7.2" (major.minor) or "6.18.35" (major.minor.patch).
+# kernel.org lays them out as:
+#   v7.x/linux-7.2.tar.xz          <- a .0 release, series dir is v7.x
+#   v7.x/linux-7.2.6.tar.xz        <- a stable update, still v7.x
+#   v6.x/linux-6.18.35.tar.xz      <- series dir is v6.x
+#   v6.18.x/linux-6.18.35.tar.xz   <- also valid
+#
+# So the series dir is always "v<major>.x" for the tarball, while the tag is
+# the full "v<version>".
+# ---------------------------------------------------------------------------
+KMAJOR="${KERNEL_VERSION%%.*}"                       # 6 / 7
+series="v${KMAJOR}.x"                                # v7.x
+tag="v$KERNEL_VERSION"                               # v7.2 / v6.18.35
+
+# The stable branch name differs: linux-7.x.y does not exist; the stable
+# branches are linux-6.18.y, linux-7.2.y, ... For a bare "7.2" the branch would
+# be linux-7.2.y.
+if [[ "$KERNEL_VERSION" == *.*.* ]]; then
+    stable_branch="linux-${KERNEL_VERSION%.*}.y"     # 6.18.35 -> linux-6.18.y
+else
+    stable_branch="linux-${KERNEL_VERSION}.y"        # 7.2 -> linux-7.2.y
+fi
+
+echo "kernel version:  $KERNEL_VERSION"
+echo "kernel.org dir:  $series"
+echo "git tag:         $tag"
+echo "stable branch:   $stable_branch"
 
 # ---------------------------------------------------------------------------
 # Helpers

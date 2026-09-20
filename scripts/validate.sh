@@ -78,9 +78,46 @@ for node in pcie1-sequencer pcie1-asm2806-controls-default pcie1-lan1-pullup-sta
 done
 
 echo "== workflow references =="
-for s in fetch-kernel.sh fetch-dts.sh build-kernel.sh build-modules.sh build-rootfs.sh mkrootfs-image.sh build-bootimg.sh check-dts.sh validate.sh free-disk-space.sh; do
+for s in fetch-kernel.sh fetch-dts.sh build-kernel.sh build-modules.sh build-rootfs.sh mkrootfs-image.sh build-bootimg.sh check-dts.sh validate.sh free-disk-space.sh test-mkbootimg.py; do
     if grep -q "$s" .github/workflows/build.yml; then ok "$s"; else bad "$s not referenced"; fi
 done
+
+echo "== boolean inputs must not use the '== false && ... || ...' idiom =="
+# On push events `inputs` is empty, and `inputs.x == false` evaluates to true,
+# so that idiom silently produced WITH_NIC_FIX=false (artifact name "nicfalse").
+if grep -E "inputs\.(with_nic_fix|enable_ssh|make_default_user)\s*==\s*false\s*&&" .github/workflows/build.yml >/dev/null 2>&1; then
+    bad "workflow still resolves booleans with 'inputs.x == false && ...'"
+else
+    ok "booleans are resolved in a step, not inline"
+fi
+if grep -q 'Resolve build options' .github/workflows/build.yml; then
+    ok "workflow has a 'Resolve build options' step"
+else
+    bad "no 'Resolve build options' step"
+fi
+
+echo "== push to main must build and publish a release =="
+if grep -q 'workflow_dispatch' .github/workflows/build.yml && \
+   grep -q 'push:' .github/workflows/build.yml; then
+    ok "workflow triggers on both dispatch and push"
+else
+    bad "workflow is missing a trigger"
+fi
+if grep -q 'Resolve release tag' .github/workflows/build.yml; then
+    ok "release job resolves its own tag"
+else
+    bad "release job has no tag resolution"
+fi
+if grep -q 'softprops/action-gh-release' .github/workflows/build.yml; then
+    ok "release job publishes via action-gh-release"
+else
+    bad "no release publishing step"
+fi
+if grep -q 'body_path: release-notes.md' .github/workflows/build.yml; then
+    ok "release has generated notes"
+else
+    bad "release has no notes"
+fi
 
 echo "== no x86-only third-party disk action =="
 # Match only non-comment lines: the workflow/script deliberately *mention*
@@ -237,6 +274,47 @@ if grep -q 'kernelrelease is' scripts/build-kernel.sh; then
     ok "build-kernel.sh asserts kernelrelease matches KERNEL_VERSION"
 else
     bad "no kernelrelease assertion"
+fi
+
+echo "== kernel.org paths must be derived correctly for 6.x and 7.x =="
+# ${VERSION%.*} on a bare "7.2" yields "7", which would give the wrong series
+# dir (v7.x instead of v7.2.x is fine for the tarball, but the *branch* name
+# must be linux-7.2.y, not linux-7.y).
+if grep -q 'stable_branch=' scripts/fetch-kernel.sh; then
+    ok "fetch-kernel.sh computes a stable branch name"
+else
+    bad "fetch-kernel.sh has no stable_branch derivation"
+fi
+if grep -q 'KMAJOR=' scripts/fetch-kernel.sh; then
+    ok "fetch-kernel.sh derives the major version explicitly"
+else
+    bad "fetch-kernel.sh does not derive KMAJOR"
+fi
+# the fragile one-liner must be gone
+if grep -qE 'major_minor="\$\{KERNEL_VERSION%\.\*\}"' scripts/fetch-kernel.sh; then
+    bad "fetch-kernel.sh still uses the fragile \${VERSION%.*} idiom"
+else
+    ok "no fragile \${VERSION%.*} idiom"
+fi
+
+echo "== 7.x awareness in build-kernel.sh =="
+if grep -q 'KMAJOR=' scripts/build-kernel.sh; then
+    ok "build-kernel.sh detects the major version"
+else
+    bad "build-kernel.sh does not detect the major version"
+fi
+if grep -q 'device_has_driver_override' scripts/build-kernel.sh; then
+    ok "build-kernel.sh asserts the 7.x driver_override API"
+else
+    bad "no 7.x API assertion in build-kernel.sh"
+fi
+
+echo "== DT fallback must exist for 7.x (Armbian has no 7.x copy) =="
+if grep -q 'FALLBACK_TO_REPO_SNAPSHOT' config/image.conf && \
+   grep -q 'copy_snapshot' scripts/fetch-dts.sh; then
+    ok "fetch-dts.sh falls back to the in-repo snapshot"
+else
+    bad "no in-repo DT fallback (7.x builds would fail)"
 fi
 
 echo

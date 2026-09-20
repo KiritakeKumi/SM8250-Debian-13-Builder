@@ -62,6 +62,18 @@ fi
 
 make -C "$KSRC" O="$KDIR" ARCH=arm64 olddefconfig 2>&1 | tee "$LOGDIR/kernel-olddefconfig.log"
 
+# ---------------------------------------------------------------------------
+# 1b. Detect the kernel's major version.
+#
+# config/kernel-base.config was dumped from a working 6.18.35 board, so it
+# carries some 6.18-only symbols. `olddefconfig` silently drops anything the
+# target kernel no longer has, which is what we want -- but we must then verify
+# the options that actually matter survived. The lists differ per major version
+# because a few symbols were renamed (e.g. QCOM_Q6V5_COMMON) or moved.
+# ---------------------------------------------------------------------------
+KMAJOR="${KERNEL_VERSION%%.*}"          # 6 or 7
+echo "kernel major version: $KMAJOR"
+
 # Fail loudly if a required option is missing.
 check_config() {
     local opt="$1" want="$2"
@@ -69,9 +81,12 @@ check_config() {
     got="$(grep -E "^${opt}=" "$KDIR/.config" || true)"
     if [[ "$got" != "${opt}=${want}" ]]; then
         echo "ERROR: kernel config $opt should be $want, got '${got:-<unset>}'" >&2
+        echo "       (kernel $KERNEL_VERSION; see config/kernel-fragment.config)" >&2
         exit 1
     fi
 }
+
+# Portable across 6.x and 7.x: these exist in both.
 check_config CONFIG_ARM64 y
 check_config CONFIG_ARCH_QCOM y
 check_config CONFIG_PCIE_QCOM y
@@ -80,6 +95,19 @@ check_config CONFIG_EXT4_FS y
 check_config CONFIG_DEVTMPFS y
 check_config CONFIG_BLK_DEV_INITRD y
 check_config CONFIG_MODULES y
+check_config CONFIG_ARM_SMMU y
+check_config CONFIG_PHY_QCOM_QMP_PCIE y
+check_config CONFIG_R8169 m
+
+# 7.x-specific sanity: the out-of-tree helper module needs this API, and it is
+# also the one that changed shape between 6.18 and 7.x.
+if [[ "$KMAJOR" -ge 7 ]]; then
+    echo "  (7.x: verifying the driver_override API the helper module uses)"
+    if ! grep -q 'device_has_driver_override' "$KSRC/include/linux/device.h"; then
+        echo "ERROR: this 7.x tree lacks device_has_driver_override()" >&2
+        exit 1
+    fi
+fi
 
 echo "---- kernel release ----"
 make -C "$KSRC" O="$KDIR" ARCH=arm64 -s kernelrelease | tee "$ART/kernelrelease.txt"
