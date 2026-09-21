@@ -23,6 +23,7 @@
 #   KERNEL_TAG=v7.2.6
 #   KERNEL_REPO=https://github.com/gregkh/linux.git
 #   KERNEL_SERIES=v7.x
+#   KERNEL_MAKEVERSION=7.2.6   <- what `make kernelversion` prints (7.2 -> 7.2.0)
 #
 # NOTE: --format=env is consumed with `eval`, so every value is printed
 # shell-quoted (printf %q). KERNEL_KIND contains spaces ("major.minor
@@ -55,6 +56,21 @@ KMAJOR="${KVER%%.*}"                 # 6 / 7
 series="v${KMAJOR}.x"                # v6.x / v7.x   (kernel.org layout)
 tag="v$KVER"                         # v6.18.35 / v7.2
 
+# What the source tree will call itself.
+#
+# `make kernelversion` always prints VERSION.PATCHLEVEL.SUBLEVEL, and the
+# v7.2 tag carries SUBLEVEL = 0 -- so a tree checked out at v7.2 reports
+# "7.2.0", not "7.2". Comparing it to the requested "7.2" made fetch-kernel.sh
+# throw away a perfectly good tree from every source in turn:
+#     rejecting .../work/src/linux-7.2: version is '7.2.0', wanted '7.2'
+# kernel.org still names the tarball linux-7.2.tar.xz and the tag v7.2, so
+# only the *reported* version needs the third component.
+if [[ "$KVER" == *.*.* ]]; then
+    makeversion="$KVER"              # 6.18.35 -> 6.18.35
+else
+    makeversion="$KVER.0"            # 7.2     -> 7.2.0
+fi
+
 # Stable point releases live in gregkh/linux. A bare major.minor exists in
 # both trees, but gregkh's is the maintained one, so prefer it uniformly.
 if [[ "$KVER" == *.*.* ]]; then
@@ -67,14 +83,16 @@ fi
 
 if [[ "$FORMAT" == "--format=env" ]]; then
     # %q, not plain echo: the caller does `eval "$(...)"`.
-    printf 'KERNEL_TAG=%q\n'    "$tag"
-    printf 'KERNEL_REPO=%q\n'   "$repo"
-    printf 'KERNEL_SERIES=%q\n' "$series"
-    printf 'KERNEL_KIND=%q\n'   "$kind"
+    printf 'KERNEL_TAG=%q\n'         "$tag"
+    printf 'KERNEL_REPO=%q\n'        "$repo"
+    printf 'KERNEL_SERIES=%q\n'      "$series"
+    printf 'KERNEL_MAKEVERSION=%q\n' "$makeversion"
+    printf 'KERNEL_KIND=%q\n'        "$kind"
 else
     printf '%-16s %s\n' "version" "$KVER"
     printf '%-16s %s\n' "tag" "$tag"
     printf '%-16s %s\n' "repo" "$repo"
     printf '%-16s %s\n' "series" "$series"
+    printf '%-16s %s\n' "makeversion" "$makeversion"
     printf '%-16s %s\n' "kind" "$kind"
 fi

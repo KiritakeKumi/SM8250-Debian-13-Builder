@@ -412,16 +412,25 @@ fi
 # and tried to run `release`, killing the CI step with
 #   line 13: release: command not found   (exit 127)
 for v in 7.2 6.18.35; do
+    # `make kernelversion` always prints three components: the v7.2 tag has
+    # SUBLEVEL = 0 and reports "7.2.0".
+    case "$v" in *.*.*) want_mv="$v" ;; *) want_mv="$v.0" ;; esac
     if out=$(bash -c '
                 set -euo pipefail
                 eval "$(bash scripts/resolve-kernel-ref.sh "$1" --format=env)"
-                printf "%s|%s|%s\n" "$KERNEL_TAG" "$KERNEL_SERIES" "$KERNEL_KIND"
+                printf "%s|%s|%s|%s\n" "$KERNEL_TAG" "$KERNEL_SERIES" \
+                                       "$KERNEL_MAKEVERSION" "$KERNEL_KIND"
             ' _ "$v" 2>&1); then
-        IFS='|' read -r r_tag r_series r_kind <<<"$out"
+        IFS='|' read -r r_tag r_series r_mv r_kind <<<"$out"
         if [[ "$r_tag" == "v$v" && -n "$r_series" && -n "$r_kind" ]]; then
             ok "resolver env output evals cleanly for $v (tag=$r_tag, kind=$r_kind)"
         else
             bad "resolver env output is wrong for $v: $out"
+        fi
+        if [[ "$r_mv" == "$want_mv" ]]; then
+            ok "resolver kernelversion for $v is $r_mv"
+        else
+            bad "resolver kernelversion for $v is '$r_mv', expected '$want_mv'"
         fi
     else
         bad "resolver env output is not eval-safe for $v: $out"
@@ -433,6 +442,19 @@ if bash scripts/resolve-kernel-ref.sh 7.2 --format=bogus >/dev/null 2>&1; then
     bad "resolver accepts an unknown --format (eval would run 'version')"
 else
     ok "resolver rejects an unknown --format"
+fi
+# The version the tree reports must never be compared to the raw
+# $KERNEL_VERSION. That is what threw away a good v7.2 checkout with
+#   rejecting .../work/src/linux-7.2: version is '7.2.0', wanted '7.2'
+if grep -q 'KERNEL_MAKEVERSION' scripts/fetch-kernel.sh; then
+    ok "fetch-kernel.sh compares against the normalised kernelversion"
+else
+    bad "fetch-kernel.sh compares the raw KERNEL_VERSION (7.2 vs 7.2.0 mismatch)"
+fi
+if grep -q 'KERNEL_MAKEVERSION' scripts/build-kernel.sh; then
+    ok "build-kernel.sh compares against the normalised kernelversion"
+else
+    bad "build-kernel.sh compares the raw KERNEL_VERSION (7.2 vs 7.2.0 mismatch)"
 fi
 
 echo "== kernel.org paths must be derived correctly for 6.x and 7.x =="

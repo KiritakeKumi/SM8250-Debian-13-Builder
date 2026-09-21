@@ -114,9 +114,17 @@ make -C "$KSRC" O="$KDIR" ARCH=arm64 -s kernelrelease | tee "$ART/kernelrelease.
 
 # Guard against silently building a different kernel than requested: the
 # release string feeds the module vermagic and the artifact names.
+#
+# Compare against $KERNEL_MAKEVERSION from the shared resolver, not against
+# $KERNEL_VERSION: `make kernelrelease` prints three components, so a tree at
+# tag v7.2 (SUBLEVEL = 0) says "7.2.0" and a literal comparison would reject
+# the correct tree. The trailing-'+' form is still accepted -- setlocalversion
+# appends it when the checkout is not exactly at a tag.
+eval "$(bash "$REPO_ROOT/scripts/resolve-kernel-ref.sh" "$KERNEL_VERSION" --format=env)"
 KREL_CHECK="$(cat "$ART/kernelrelease.txt")"
-if [[ "$KREL_CHECK" != "$KERNEL_VERSION" && "$KREL_CHECK" != "$KERNEL_VERSION"+* ]]; then
-    echo "ERROR: kernelrelease is '$KREL_CHECK' but KERNEL_VERSION is '$KERNEL_VERSION'." >&2
+if [[ "$KREL_CHECK" != "$KERNEL_MAKEVERSION" && "$KREL_CHECK" != "$KERNEL_MAKEVERSION"+* ]]; then
+    echo "ERROR: kernelrelease is '$KREL_CHECK' but KERNEL_VERSION is '$KERNEL_VERSION'" >&2
+    echo "       (expected kernelrelease '$KERNEL_MAKEVERSION')." >&2
     echo "       The source tree is the wrong version. Delete work/src/linux-$KERNEL_VERSION" >&2
     echo "       and the matching CI cache, then rerun." >&2
     exit 1

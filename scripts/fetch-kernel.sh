@@ -4,7 +4,9 @@
 # The version must match EXACTLY. A mismatch is a hard error: the release
 # string ends up in the module vermagic and in the artifact names, so silently
 # building 6.18.52 when 6.18.35 was asked for produces images that look right
-# but carry the wrong kernel.
+# but carry the wrong kernel. ("Exactly" is compared against
+# $KERNEL_MAKEVERSION -- `make kernelversion` prints three components, so the
+# v7.2 tag legitimately reports 7.2.0.)
 #
 # Order of attempts:
 #   1. kernel.org release tarball          (fast, checksummed, exact version)
@@ -42,6 +44,10 @@ mkdir -p "$SRC_DIR" "$LOGDIR"
 eval "$(bash "$REPO_ROOT/scripts/resolve-kernel-ref.sh" "$KERNEL_VERSION" --format=env)"
 series="$KERNEL_SERIES"
 tag="$KERNEL_TAG"
+# What the tree will report about itself. NOT the same string as
+# $KERNEL_VERSION for a bare major.minor: the v7.2 tag has SUBLEVEL = 0, so
+# `make kernelversion` says "7.2.0". See resolve-kernel-ref.sh.
+makever="$KERNEL_MAKEVERSION"
 
 # The stable branch name differs: linux-7.x.y does not exist; the stable
 # branches are linux-6.18.y, linux-7.2.y, ... For a bare "7.2" the branch would
@@ -57,6 +63,7 @@ echo "kernel.org dir:  $series"
 echo "git tag:         $tag"
 echo "git repo:        $KERNEL_REPO"
 echo "stable branch:   $stable_branch"
+echo "expected kernelversion: $makever"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,8 +84,10 @@ source_is_good() {
     have_helper "$tree" || return 1
     local v
     v="$(source_version "$tree")"
-    if [[ "$v" != "$KERNEL_VERSION" ]]; then
-        echo "   rejecting $tree: version is '$v', wanted '$KERNEL_VERSION'"
+    # Compare against $makever, not $KERNEL_VERSION: `make kernelversion`
+    # always prints three components, so a tree at tag v7.2 reports "7.2.0".
+    if [[ "$v" != "$makever" ]]; then
+        echo "   rejecting $tree: version is '$v', wanted '$makever'"
         return 1
     fi
     return 0
@@ -233,8 +242,8 @@ EOF
 fi
 
 actual="$(source_version "$KSRC")"
-if [[ "$actual" != "$KERNEL_VERSION" ]]; then
-    echo "ERROR: fetched source reports '$actual' but '$KERNEL_VERSION' was requested" >&2
+if [[ "$actual" != "$makever" ]]; then
+    echo "ERROR: fetched source reports '$actual' but '$makever' was requested" >&2
     exit 1
 fi
 
