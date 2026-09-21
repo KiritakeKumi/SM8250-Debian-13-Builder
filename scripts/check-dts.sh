@@ -97,11 +97,15 @@ if [ -z "$DTC" ]; then
     exit 1
 fi
 echo "== compile (dtc = $DTC) =="
+# An unknown -Wno-<check> is FATAL for dtc, and the check names differ between
+# the distro dtc used here and the one Linux 7.2 builds, so probe them.
+DTC_WFLAGS=$(sh "$REPO_ROOT/scripts/dtc-warn-flags.sh" "$DTC")
+echo "   warning flags: ${DTC_WFLAGS:-(none)}"
+# shellcheck disable=SC2086  # DTC_WFLAGS must word-split into separate flags
 "$DTC" -o "$WORK/merged.dtb" -b 0 \
     -i "$KSRC/arch/arm64/boot/dts/qcom" \
     -i "$KSRC/scripts/dtc/include-prefixes" \
-    -Wno-unique_unit_address -Wno-unit_address_vs_reg -Wno-avoid_unnecessary_addr_size \
-    -Wno-alias_paths -Wno-graph_child_address -Wno-simple_bus_reg \
+    $DTC_WFLAGS \
     "$WORK/merged.pre.dts"
 
 test -s "$WORK/merged.dtb" || { echo "DTB not produced" >&2; exit 1; }

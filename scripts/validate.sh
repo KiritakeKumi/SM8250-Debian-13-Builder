@@ -457,6 +457,47 @@ else
     bad "build-kernel.sh compares the raw KERNEL_VERSION (7.2 vs 7.2.0 mismatch)"
 fi
 
+echo "== dtc warning flags must be probed, not hardcoded =="
+# dtc check names are not stable across versions and an unknown -Wno-<name> is
+# FATAL, not ignored. The dtc bundled with Linux 7.2 dropped
+# graph_child_address, which killed the DTB step with
+#   FATAL ERROR: Unrecognized check name "graph_child_address"
+# while the distro dtc used by the validate job still accepted it.
+if [[ -s scripts/dtc-warn-flags.sh ]]; then
+    ok "scripts/dtc-warn-flags.sh present"
+else
+    bad "scripts/dtc-warn-flags.sh missing"
+fi
+hardcoded=$(grep -n -- '-Wno-[a-z_]*' scripts/build-kernel.sh scripts/check-dts.sh 2>/dev/null \
+            | grep -v ':[0-9]*: *#' || true)
+if [[ -n "$hardcoded" ]]; then
+    bad "dtc -Wno- flags are still hardcoded:"
+    printf '        %s\n' "$hardcoded"
+else
+    ok "no hardcoded dtc -Wno- flags in build-kernel.sh / check-dts.sh"
+fi
+# Functional: a dtc that rejects one check must get exactly that flag dropped.
+probe_dir=$(mktemp -d)
+cat > "$probe_dir/dtc" <<'FAKEDTC'
+#!/usr/bin/env bash
+for a in "$@"; do
+    if [[ "$a" == "-Wno-graph_child_address" ]]; then
+        echo 'FATAL ERROR: Unrecognized check name "graph_child_address"' >&2
+        exit 1
+    fi
+done
+prev=""; for a in "$@"; do [[ "$prev" == "-o" ]] && : > "$a"; prev="$a"; done
+exit 0
+FAKEDTC
+chmod +x "$probe_dir/dtc"
+probed=$(sh scripts/dtc-warn-flags.sh "$probe_dir/dtc" 2>/dev/null || true)
+if [[ "$probed" != *graph_child_address* && "$probed" == *-Wno-unit_address_vs_reg* ]]; then
+    ok "unsupported dtc checks are dropped, supported ones kept"
+else
+    bad "dtc flag probe is wrong (got: '$probed')"
+fi
+rm -rf "$probe_dir"
+
 echo "== kernel.org paths must be derived correctly for 6.x and 7.x =="
 # ${VERSION%.*} on a bare "7.2" yields "7", which would give the wrong series
 # dir (v7.x instead of v7.2.x is fine for the tarball, but the *branch* name

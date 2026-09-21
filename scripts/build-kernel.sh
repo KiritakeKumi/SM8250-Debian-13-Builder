@@ -200,11 +200,15 @@ fi
 echo "  preprocessed: $(wc -l < "$ART/$DTB_BASENAME.preprocessed.dts") lines"
 
 echo "compiling $DTB_BASENAME.dtb"
+# Ask this dtc which check names it knows: an unknown -Wno-<check> is FATAL,
+# and the dtc bundled with Linux 7.2 dropped graph_child_address.
+DTC_WFLAGS="$(sh "$REPO_ROOT/scripts/dtc-warn-flags.sh" "$KDIR/scripts/dtc/dtc")"
+echo "  dtc warning flags: ${DTC_WFLAGS:-(none)}"
+# shellcheck disable=SC2086  # DTC_WFLAGS must word-split into separate flags
 "$KDIR/scripts/dtc/dtc" -o "$ART/$DTB_BASENAME.dtb" -b 0 \
     -i "$KSRC/arch/arm64/boot/dts/qcom" \
     -i "$KSRC/scripts/dtc/include-prefixes" \
-    -Wno-unique_unit_address -Wno-unit_address_vs_reg -Wno-avoid_unnecessary_addr_size \
-    -Wno-alias_paths -Wno-graph_child_address -Wno-simple_bus_reg \
+    $DTC_WFLAGS \
     "$ART/$DTB_BASENAME.preprocessed.dts" 2>&1 | tee "$LOGDIR/dtc.log"
 
 test -s "$ART/$DTB_BASENAME.dtb" || { echo "DTB not built" >&2; exit 1; }
