@@ -65,7 +65,11 @@ fi
 echo "creating ${ROOTFS_SIZE_MB} MiB ext4 image at $IMG"
 rm -f "$IMG"
 truncate -s "${ROOTFS_SIZE_MB}M" "$IMG"
-mkfs.ext4 -F -L rootfs -E lazy_itable_init=0,lazy_journal_init=0 "$IMG" \
+# -U: pin the UUID. Without it mkfs.ext4 rolls a random one per build, and
+# build-bootimg.sh bakes it into root=UUID=... -- so a boot.img could only ever
+# boot the rootfs.img built alongside it. See config/image.conf.
+mkfs.ext4 -F -L rootfs -U "$ROOTFS_UUID" \
+    -E lazy_itable_init=0,lazy_journal_init=0 "$IMG" \
     2>&1 | tee "$LOGDIR/mkfs-rootfs.log"
 
 MNT="$(mktemp -d)"
@@ -88,9 +92,15 @@ trap - EXIT
 # shrink to the minimum, then report
 e2fsck -p -f "$IMG" 2>&1 | tee -a "$LOGDIR/mkfs-rootfs.log" || true
 
-ROOTFS_UUID="$(blkid -s UUID -o value "$IMG")"
-echo "$ROOTFS_UUID" > "$WORKSPACE/rootfs-uuid.txt"
-echo "rootfs UUID: $ROOTFS_UUID"
+ROOTFS_UUID_ACTUAL="$(blkid -s UUID -o value "$IMG")"
+if [[ "$ROOTFS_UUID_ACTUAL" != "$ROOTFS_UUID" ]]; then
+    echo "ERROR: image UUID is '$ROOTFS_UUID_ACTUAL' but config/image.conf pins" >&2
+    echo "       '$ROOTFS_UUID'. The kernel command line would not match the" >&2
+    echo "       filesystem and the initramfs could not find the rootfs." >&2
+    exit 1
+fi
+echo "$ROOTFS_UUID_ACTUAL" > "$WORKSPACE/rootfs-uuid.txt"
+echo "rootfs UUID: $ROOTFS_UUID_ACTUAL (pinned in config/image.conf)"
 
 echo "rootfs image:"
 ls -lh "$IMG"

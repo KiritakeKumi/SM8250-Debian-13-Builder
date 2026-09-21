@@ -271,20 +271,62 @@ for w in $(cat /proc/cmdline); do
     [ "$w" = "ro" ] && RWFLAG=ro
 done
 
+# Does /mnt/root hold the Debian rootfs? Builtins only -- see the NOTE below.
+#
+# NOTE: do NOT use `[ -x /mnt/root/sbin/init ]`. Debian's /sbin/init is an
+# *absolute* symlink (-> /lib/systemd/systemd), and -x follows it relative to
+# the current root -- the initramfs -- where that path does not exist. It
+# would reject a perfectly good rootfs. /etc is a real directory, and -L
+# matches the link itself without dereferencing it.
+root_looks_ok() {
+    [ -d /mnt/root/etc ] || return 1
+    [ -e /mnt/root/sbin/init ] || [ -L /mnt/root/sbin/init ] || return 1
+    return 0
+}
+
+# Mount $1 and keep it only if it really is the rootfs.
+try_root() {
+    mount -o "$RWFLAG" "$1" /mnt/root 2>/dev/null || return 1
+    if root_looks_ok; then
+        echo "[initramfs] mounted $1 $RWFLAG"
+        return 0
+    fi
+    echo "[initramfs] $1 mounted but does not look like the Debian rootfs"
+    umount /mnt/root 2>/dev/null
+    return 1
+}
+
 mounted=0
 tries=0
 while [ $tries -lt 30 ]; do
-    if mount -o "$RWFLAG" "$ROOT" /mnt/root 2>/dev/null; then
+    if try_root "$ROOT"; then
         mounted=1
-        echo "[initramfs] mounted $ROOT $RWFLAG"
         break
     fi
     tries=$((tries+1))
     sleep 1
 done
 
-# NOTE: the result is judged by mount's own exit status and by shell builtins
-# only -- never by an external helper. This check used to be
+# Fallbacks. The rootfs UUID is pinned in config/image.conf, but a rootfs
+# written by an older build still carries a random one, and then root=UUID=...
+# points at something that is not on this board:
+#     UUID=13766272-...: Can't lookup blockdev
+# The label and the first UFS partition are checked the same way, so we can
+# only ever land on something that actually looks like the rootfs.
+if [ "$mounted" != 1 ]; then
+    echo "[initramfs] $ROOT never showed up; trying fallbacks"
+    for cand in LABEL=rootfs /dev/sda1; do
+        if try_root "$cand"; then
+            mounted=1
+            echo "[initramfs] WARNING: booted from $cand, not $ROOT"
+            echo "[initramfs] WARNING: boot.img and rootfs.img are from different builds"
+            break
+        fi
+    done
+fi
+
+# NOTE: whether the mount worked is judged by mount's own exit status and by
+# shell builtins only -- never by an external helper. This used to be
 #     if ! mountpoint -q /mnt/root; then
 # and the busybox that Debian/Ubuntu ships has no `mountpoint` applet, so it
 # died with "/init: line 22: mountpoint: not found". `!` turned that 127 into
@@ -294,23 +336,10 @@ done
 #     [initramfs] FAILED to mount UUID=618ef20f-..., dropping to shell
 if [ "$mounted" != 1 ]; then
     echo "[initramfs] FAILED to mount $ROOT after ${tries}s, dropping to shell"
+    echo "[initramfs] to boot the system by hand:"
+    echo "[initramfs]   mount -o rw /dev/sda1 /mnt/root && exec switch_root /mnt/root /sbin/init"
     echo "[initramfs] ---- /proc/mounts ----"; cat /proc/mounts 2>/dev/null
     echo "[initramfs] ---- /dev ----";         ls /dev 2>/dev/null
-    exec /bin/sh
-fi
-
-# Sanity check with builtins only: did we mount something that looks like the
-# Debian rootfs? NOTE: do NOT use `[ -x /mnt/root/sbin/init ]`. Debian's
-# /sbin/init is an *absolute* symlink (-> /lib/systemd/systemd), and -x
-# follows it relative to the current root -- the initramfs -- where that path
-# does not exist. It would fail on a perfectly good rootfs. /etc is a real
-# directory, and -L matches the link itself without dereferencing it.
-rootfs_ok=1
-[ -d /mnt/root/etc ] || rootfs_ok=0
-[ -e /mnt/root/sbin/init ] || [ -L /mnt/root/sbin/init ] || rootfs_ok=0
-if [ "$rootfs_ok" != 1 ]; then
-    echo "[initramfs] $ROOT does not look like the Debian rootfs, dropping to shell"
-    ls /mnt/root 2>/dev/null
     exec /bin/sh
 fi
 

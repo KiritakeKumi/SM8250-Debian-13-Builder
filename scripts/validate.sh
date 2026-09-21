@@ -457,6 +457,44 @@ else
     bad "build-kernel.sh compares the raw KERNEL_VERSION (7.2 vs 7.2.0 mismatch)"
 fi
 
+echo "== the rootfs UUID must be pinned, not random per build =="
+# mkfs.ext4 rolls a random UUID unless given -U, and build-bootimg.sh bakes it
+# into root=UUID=... So a random UUID makes boot.img and rootfs.img a matched
+# pair: flashing a new boot.img onto an older rootfs gives
+#   UUID=13766272-...: Can't lookup blockdev
+#   [initramfs] FAILED to mount UUID=13766272-... after 30s
+if [[ -n "${ROOTFS_UUID:-}" ]]; then
+    ok "config/image.conf pins ROOTFS_UUID=$ROOTFS_UUID"
+    if [[ "$ROOTFS_UUID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        ok "ROOTFS_UUID is a well-formed UUID"
+    else
+        bad "ROOTFS_UUID '$ROOTFS_UUID' is not a well-formed UUID (mkfs.ext4 -U would reject it)"
+    fi
+else
+    bad "config/image.conf does not pin ROOTFS_UUID"
+fi
+if grep -q 'mkfs.ext4.*-U "\$ROOTFS_UUID"' scripts/mkrootfs-image.sh; then
+    ok "mkrootfs-image.sh passes -U to mkfs.ext4"
+else
+    bad "mkrootfs-image.sh does not pin the filesystem UUID (random per build)"
+fi
+if grep -q 'ROOTFS_UUID_ACTUAL' scripts/mkrootfs-image.sh; then
+    ok "mkrootfs-image.sh verifies the image really got that UUID"
+else
+    bad "mkrootfs-image.sh does not verify the resulting UUID"
+fi
+# A mismatched pair must still boot: /init falls back to the label and sda1.
+if grep -q 'LABEL=rootfs' scripts/build-kernel.sh; then
+    ok "/init falls back to LABEL=rootfs when root=UUID= is not found"
+else
+    bad "/init has no fallback for a boot.img/rootfs.img UUID mismatch"
+fi
+if grep -q 'mkfs.ext4 -F -L rootfs' scripts/mkrootfs-image.sh; then
+    ok "the image is labelled 'rootfs' (the fallback depends on it)"
+else
+    bad "the rootfs image is not labelled 'rootfs' but /init falls back to that label"
+fi
+
 echo "== every command /init uses must exist in the initramfs =="
 # The initramfs busybox only provides the applets it was compiled with, and
 # `busybox --install -s` silently links only those. A missing one is not a
