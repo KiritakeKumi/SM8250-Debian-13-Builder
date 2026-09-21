@@ -76,8 +76,35 @@ MNT="$(mktemp -d)"
 mount -o loop "$IMG" "$MNT"
 trap 'umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true' EXIT
 
-echo "copying rootfs (preserving xattrs/perms)"
-tar -C "$ROOTFS" -cf - . | tar -C "$MNT" -xpf -
+echo "copying rootfs (preserving xattrs/caps/perms)"
+# --xattrs is REQUIRED on BOTH ends. Without it GNU tar silently drops the
+# security.* extended attributes, and the file capabilities go with them:
+#   /usr/bin/ping loses cap_net_raw+ep, so an unprivileged `ping` fails with
+#     ping: socktype: SOCK_RAW
+#     ping: socket: Operation not permitted (missing cap_net_raw+p capability)
+# while root still works (root bypasses the capability check). The
+# --xattrs-include='*' is needed because tar restricts to user.* by default;
+# security.capability lives in the security.* namespace.
+tar --xattrs --xattrs-include='*' -C "$ROOTFS" -cf - . \
+    | tar --xattrs --xattrs-include='*' -C "$MNT" -xpf -
+
+# Belt-and-braces: confirm the capability actually survived the round trip, so
+# this can never silently regress again. getcap may be absent on the runner;
+# fall back to reading the raw xattr.
+if [[ -e "$MNT/usr/bin/ping" ]]; then
+    caps=""
+    if command -v getcap >/dev/null 2>&1; then
+        caps="$(getcap "$MNT/usr/bin/ping" 2>/dev/null || true)"
+    elif command -v getfattr >/dev/null 2>&1; then
+        caps="$(getfattr -n security.capability --only-values "$MNT/usr/bin/ping" 2>/dev/null || true)"
+    fi
+    if [[ -n "$caps" ]]; then
+        echo "  cap check: /usr/bin/ping carries capabilities ($caps)"
+    else
+        echo "WARNING: /usr/bin/ping has no file capabilities in the image;" >&2
+        echo "         unprivileged ping will fail. Is tar --xattrs working?" >&2
+    fi
+fi
 
 # Make sure the boot artifacts really landed.
 for f in boot/Image.gz boot/initramfs.cpio.gz; do

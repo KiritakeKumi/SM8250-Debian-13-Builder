@@ -457,6 +457,61 @@ else
     bad "build-kernel.sh compares the raw KERNEL_VERSION (7.2 vs 7.2.0 mismatch)"
 fi
 
+echo "== the GPU firmware must be baked into the initramfs =="
+# CONFIG_DRM_MSM is built-in and probes before switch_root, so the Adreno
+# microcode (in the rootfs) is unreachable and fails with -ENOENT on every
+# boot. build-rootfs.sh appends it to the initramfs as a second cpio segment.
+if grep -q 'CONFIG_DRM_MSM=y' config/kernel-base.config config/kernel-fragment.config 2>/dev/null; then
+    if grep -q 'inject_initramfs_firmware' scripts/build-rootfs.sh; then
+        ok "DRM_MSM is built-in and the GPU firmware is injected into the initramfs"
+    else
+        bad "DRM_MSM=y (probes before rootfs) but the GPU firmware is not in the initramfs"
+    fi
+else
+    ok "DRM_MSM is not built-in; firmware loads after rootfs is mounted"
+fi
+if grep -q 'a650_sqe.fw' scripts/build-rootfs.sh && grep -q 'a650_gmu.bin' scripts/build-rootfs.sh; then
+    ok "both a650_sqe.fw and a650_gmu.bin are staged for the initramfs"
+else
+    bad "the initramfs firmware set is incomplete (need a650_sqe.fw + a650_gmu.bin)"
+fi
+# It must append (concatenate), not overwrite, the busybox initramfs.
+if grep -q '>> "\$ART/initramfs.cpio.gz"' scripts/build-rootfs.sh; then
+    ok "firmware is appended as a second cpio segment (busybox /init preserved)"
+else
+    bad "firmware write does not append; it would clobber the busybox initramfs"
+fi
+
+echo "== the rootfs copy must preserve file capabilities =="
+# /usr/bin/ping relies on the file capability cap_net_raw+ep, stored in the
+# security.capability xattr. A plain `tar -cf - | tar -xpf -` drops it, and
+# unprivileged ping then fails with "missing cap_net_raw+p capability". Both
+# ends of the pipe need --xattrs, and --xattrs-include='*' to reach the
+# security.* namespace (tar defaults to user.* only).
+copy_line=$(grep -n 'tar .*-C "\$ROOTFS" -cf -' scripts/mkrootfs-image.sh | head -1 | cut -d: -f1)
+if [[ -n "$copy_line" ]]; then
+    # look at the create side and the extract side (next couple of lines)
+    copy_block=$(sed -n "${copy_line},$((copy_line+2))p" scripts/mkrootfs-image.sh)
+    if printf '%s' "$copy_block" | grep -q -- '--xattrs' \
+       && printf '%s' "$copy_block" | grep -q -- "--xattrs-include='\*'"; then
+        ok "rootfs is copied with tar --xattrs --xattrs-include='*'"
+    else
+        bad "the rootfs tar copy lacks --xattrs; file capabilities (ping) will be dropped"
+    fi
+else
+    bad "could not find the rootfs copy command in mkrootfs-image.sh"
+fi
+if grep -q 'getcap\|getfattr' scripts/mkrootfs-image.sh; then
+    ok "mkrootfs-image.sh verifies /usr/bin/ping kept its capability"
+else
+    bad "mkrootfs-image.sh does not verify the capability survived"
+fi
+if grep -q 'ping_group_range' scripts/build-rootfs.sh; then
+    ok "unprivileged ping also works via ping_group_range (belt and braces)"
+else
+    bad "no ping_group_range fallback; ping breaks if the cap is ever lost"
+fi
+
 echo "== the two board variants must stay separated end to end =="
 # tc-eb5 and lite-865 differ ONLY in the device tree and the helper module,
 # and that difference is load-bearing: the NIC-fix overlay rewrites the root

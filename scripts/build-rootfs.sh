@@ -231,6 +231,62 @@ fi
 echo "all required firmware present"
 
 # ---------------------------------------------------------------------------
+# 3c. Bake the GPU firmware into the initramfs
+# ---------------------------------------------------------------------------
+# CONFIG_DRM_MSM=y is built-in and probes during the initramfs stage, BEFORE
+# /init runs switch_root -- so the Adreno microcode, which lives in the rootfs,
+# is not reachable yet and the load fails on every boot:
+#     msm_dpu ...: Direct firmware load for qcom/a650_sqe.fw failed error -2
+#     [drm:adreno_request_fw] *ERROR* failed to load a650_sqe.fw
+#     [drm] Cannot find any crtc or sizes
+# The initramfs is unpacked in a rootfs_initcall, before device_initcall driver
+# probes, so firmware placed in it IS present when the GPU probes. We append it
+# as a second gzip cpio segment: the kernel unpacks concatenated compressed
+# cpios, so the busybox initramfs from build-kernel.sh does not need rebuilding.
+#
+# Reuses the firmware Debian already installed -- no extra download. Both board
+# variants carry the same SoC GPU, so this runs for tc-eb5 and lite-865 alike.
+inject_initramfs_firmware() {
+    local want=(qcom/a650_sqe.fw qcom/a650_gmu.bin)
+    # optional zap shader; only some firmware trees ship it
+    local extra
+    for extra in qcom/a650_zap.mbn qcom/a650_zap.mdt; do
+        [[ -e "$ROOTFS/lib/firmware/$extra" || -e "$ROOTFS/usr/lib/firmware/$extra" ]] \
+            && want+=("$extra")
+    done
+
+    local stage="$WORKSPACE/initramfs-fw"
+    rm -rf "$stage"
+    local f src got=0
+    for f in "${want[@]}"; do
+        src="$ROOTFS/lib/firmware/$f"
+        [[ -e "$src" ]] || src="$ROOTFS/usr/lib/firmware/$f"
+        if [[ -e "$src" ]]; then
+            install -D "$src" "$stage/lib/firmware/$f"
+            echo "  + initramfs firmware: $f"
+            got=1
+        else
+            echo "  WARNING: $f not found; GPU may fail to init" >&2
+        fi
+    done
+    if (( ! got )); then
+        echo "  WARNING: no GPU firmware staged for the initramfs" >&2
+        return 0
+    fi
+
+    # Append a second, independently-gzipped cpio segment.
+    ( cd "$stage" && find . -print0 \
+        | cpio --null -o --format=newc 2>/dev/null | gzip -9 ) \
+        >> "$ART/initramfs.cpio.gz"
+    rm -rf "$stage"
+    echo "initramfs now $(stat -c%s "$ART/initramfs.cpio.gz") bytes (with GPU firmware)"
+
+    # Keep the spare copy in the rootfs consistent with what goes into boot.img.
+    cp -v "$ART/initramfs.cpio.gz" "$ROOTFS/boot/initramfs.cpio.gz"
+}
+inject_initramfs_firmware
+
+# ---------------------------------------------------------------------------
 # 4. Hostname / hosts / fstab / locale / timezone
 # ---------------------------------------------------------------------------
 echo "$TARGET_HOSTNAME" > "$ROOTFS/etc/hostname"
@@ -329,6 +385,19 @@ EOF
 chroot "$ROOTFS" systemctl enable systemd-networkd 2>&1 | tee -a "$LOGDIR/rootfs-misc.log" || true
 chroot "$ROOTFS" systemctl enable systemd-resolved 2>&1 | tee -a "$LOGDIR/rootfs-misc.log" || true
 ln -sf /run/systemd/resolve/stub-resolv.conf "$ROOTFS/etc/resolv.conf"
+
+# Let unprivileged users ping. iputils-ping prefers an ICMP datagram socket
+# (SOCK_DGRAM), which needs no capability at all -- but only if the caller's
+# gid falls in net.ipv4.ping_group_range, and Debian ships that as the empty
+# range "1 0". Widening it means `ping` works for the debian user even if the
+# binary's cap_net_raw is ever lost. (mkrootfs-image.sh also preserves the
+# capability via tar --xattrs; this is the belt to that suspenders.)
+install -d -m 0755 "$ROOTFS/etc/sysctl.d"
+cat > "$ROOTFS/etc/sysctl.d/10-ping-group.conf" <<'EOF'
+# Allow all gids to open ICMP echo (datagram) sockets, so ping works without
+# cap_net_raw / setuid. Range is "min max" (inclusive).
+net.ipv4.ping_group_range = 0 2147483647
+EOF
 
 # ---------------------------------------------------------------------------
 # 8. Out-of-tree helper modules: load them early
