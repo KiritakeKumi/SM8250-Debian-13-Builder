@@ -241,7 +241,12 @@ build_initramfs() {
         return 1
     fi
     cp "$bb" "$work/bin/busybox"
-    for applet in sh mount umount switch_root sleep echo cat ls mkdir mknod dmesg; do
+    # Every external command /init uses must be listed here. `busybox
+    # --install -s` on line 2 of /init is best-effort: it only links applets
+    # that are actually compiled into this busybox, and it is allowed to fail
+    # outright. scripts/validate.sh checks this list against /init.
+    for applet in sh mount umount switch_root sleep echo cat ls mkdir mknod \
+                  dmesg sed grep; do
         ln -sf busybox "$work/bin/$applet"
     done
     ln -sf ../bin/busybox "$work/sbin/init"
@@ -258,21 +263,58 @@ ROOT="$(sed -n 's/.*\broot=\([^ ]*\).*/\1/p' /proc/cmdline)"
 echo "[initramfs] root=$ROOT"
 [ -z "$ROOT" ] && ROOT=/dev/sda1
 
+# Honour rw/ro from the command line (config/boot-cmdline.txt asks for rw).
+# Default to ro, like a stock initramfs: systemd remounts / per /etc/fstab.
+RWFLAG=ro
+for w in $(cat /proc/cmdline); do
+    [ "$w" = "rw" ] && RWFLAG=rw
+    [ "$w" = "ro" ] && RWFLAG=ro
+done
+
+mounted=0
 tries=0
 while [ $tries -lt 30 ]; do
-    if mount -o ro "$ROOT" /mnt/root 2>/dev/null; then
-        echo "[initramfs] mounted $ROOT"
+    if mount -o "$RWFLAG" "$ROOT" /mnt/root 2>/dev/null; then
+        mounted=1
+        echo "[initramfs] mounted $ROOT $RWFLAG"
         break
     fi
     tries=$((tries+1))
     sleep 1
 done
 
-if ! mountpoint -q /mnt/root; then
-    echo "[initramfs] FAILED to mount $ROOT, dropping to shell"
+# NOTE: the result is judged by mount's own exit status and by shell builtins
+# only -- never by an external helper. This check used to be
+#     if ! mountpoint -q /mnt/root; then
+# and the busybox that Debian/Ubuntu ships has no `mountpoint` applet, so it
+# died with "/init: line 22: mountpoint: not found". `!` turned that 127 into
+# "the mount failed", and a perfectly good rootfs was thrown away:
+#     EXT4-fs (sda1): mounted filesystem ... ro with ordered data mode
+#     [initramfs] mounted UUID=618ef20f-...
+#     [initramfs] FAILED to mount UUID=618ef20f-..., dropping to shell
+if [ "$mounted" != 1 ]; then
+    echo "[initramfs] FAILED to mount $ROOT after ${tries}s, dropping to shell"
+    echo "[initramfs] ---- /proc/mounts ----"; cat /proc/mounts 2>/dev/null
+    echo "[initramfs] ---- /dev ----";         ls /dev 2>/dev/null
     exec /bin/sh
 fi
 
+# Sanity check with builtins only: did we mount something that looks like the
+# Debian rootfs? NOTE: do NOT use `[ -x /mnt/root/sbin/init ]`. Debian's
+# /sbin/init is an *absolute* symlink (-> /lib/systemd/systemd), and -x
+# follows it relative to the current root -- the initramfs -- where that path
+# does not exist. It would fail on a perfectly good rootfs. /etc is a real
+# directory, and -L matches the link itself without dereferencing it.
+rootfs_ok=1
+[ -d /mnt/root/etc ] || rootfs_ok=0
+[ -e /mnt/root/sbin/init ] || [ -L /mnt/root/sbin/init ] || rootfs_ok=0
+if [ "$rootfs_ok" != 1 ]; then
+    echo "[initramfs] $ROOT does not look like the Debian rootfs, dropping to shell"
+    ls /mnt/root 2>/dev/null
+    exec /bin/sh
+fi
+
+echo "[initramfs] switch_root -> /sbin/init"
 exec switch_root /mnt/root /sbin/init
 INITEOF
     chmod +x "$work/init"

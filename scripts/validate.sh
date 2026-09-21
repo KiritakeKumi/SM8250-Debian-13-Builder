@@ -457,6 +457,44 @@ else
     bad "build-kernel.sh compares the raw KERNEL_VERSION (7.2 vs 7.2.0 mismatch)"
 fi
 
+echo "== every command /init uses must exist in the initramfs =="
+# The initramfs busybox only provides the applets it was compiled with, and
+# `busybox --install -s` silently links only those. A missing one is not a
+# warning: the shell returns 127, which `if ! cmd` turns into "success", and
+# the board drops to a BusyBox prompt with the rootfs already mounted:
+#     /init: line 22: mountpoint: not found
+#     [initramfs] FAILED to mount UUID=..., dropping to shell
+init_script=$(sed -n "/<<'INITEOF'/,/^INITEOF$/p" scripts/build-kernel.sh \
+              | sed '1d;$d' | sed 's/#.*$//')
+applet_list=$(sed -n '/for applet in /,/; do$/p' scripts/build-kernel.sh \
+              | tr '\\\n' '  ' | sed -e 's/.*for applet in //' -e 's/; do.*//')
+if [[ -z "$init_script" || -z "$applet_list" ]]; then
+    bad "could not extract /init or its applet list from build-kernel.sh"
+else
+    ok "applets linked into the initramfs: $(echo $applet_list | tr '\n' ' ')"
+    # Any of these that /init calls must be linked. mountpoint is deliberately
+    # in the vocabulary: Debian/Ubuntu busybox does not have it.
+    missing=""
+    for cmd in mount umount switch_root sleep cat ls mkdir mknod dmesg sed \
+               grep awk blkid findfs mountpoint chroot cp mv rm ln sync \
+               udevadm modprobe insmod fsck; do
+        if printf '%s\n' "$init_script" | grep -qE "(^|[^-[:alnum:]_/])$cmd([[:space:]]|$)"; then
+            printf '%s\n' $applet_list | grep -qx "$cmd" || missing="$missing $cmd"
+        fi
+    done
+    if [[ -n "$missing" ]]; then
+        bad "/init calls commands that are not linked into the initramfs:$missing"
+    else
+        ok "/init only calls applets that are linked"
+    fi
+    # The decision to drop to a shell must not hang off an external command.
+    if printf '%s\n' "$init_script" | grep -q 'mountpoint'; then
+        bad "/init still uses 'mountpoint' (not a Debian busybox applet)"
+    else
+        ok "/init does not depend on 'mountpoint'"
+    fi
+fi
+
 echo "== the default kernel version must be stated once, consistently =="
 # `inputs` is empty on push events, so every one of these fallbacks is a real
 # default -- and there are five of them plus the input's own `default:`. They
