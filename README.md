@@ -45,7 +45,7 @@ GitHub 的 **arm64 runner 只有 14 GB 磁盘**（`ubuntu-24.04-arm`）。本流
 | --- | --- | --- |
 | `kernel_version` | `7.2` | 内核版本，取 kernel.org 的 tarball。想回 6.18 稳定线就填 `6.18.35`，见下方说明 |
 | `dtb_source` | `upstream-armbian` | 设备树来源：`upstream-armbian`（官方主线 DT）/ `upstream-vendor-dg`（本地快照）/ `custom`（`dts/custom/`） |
-| `with_nic_fix` | `true` | 是否编译并安装树外网卡修复模块（ASM2806 + 双 RTL8168 枚举） |
+| `variants` | `both` | 构建哪些型号：`both` / `tc-eb5` / `lite-865`。见下方[型号](#型号) |
 | `rootfs_size_mb` | `6000` | rootfs 镜像大小（MiB）。必须 ≥ 板子 rootfs 分区实际大小 |
 | `hostname` | `nico-sm8250` | 目标机主机名 |
 | `root_password` | `root` | root 密码（首登会被要求改） |
@@ -71,18 +71,45 @@ GitHub 的 **arm64 runner 只有 14 GB 磁盘**（`ubuntu-24.04-arm`）。本流
 用法：
 
 ```bash
-gunzip -k nico-debian-sm8250-trixie.rootfs.img.gz
-fastboot flash rootfs nico-debian-sm8250-trixie.rootfs.img
+gunzip -k nico-debian-sm8250-trixie-tc-eb5.rootfs.img.gz
+fastboot flash rootfs nico-debian-sm8250-trixie-tc-eb5.rootfs.img
 ```
 
-`SHA256SUMS` 里同时有 `.img` 和 `.img.gz` 两个哈希，校验压缩包用：
+（把 `tc-eb5` 换成 `lite-865` 就是另一块板子的。）
+
+`SHA256SUMS-<型号>` 里同时有 `.img` 和 `.img.gz` 两个哈希，校验压缩包用：
 
 ```bash
-sha256sum -c SHA256SUMS --ignore-missing
+sha256sum -c SHA256SUMS-trixie-tc-eb5 --ignore-missing
 ```
 
 如果压缩后仍然超过 2 GiB，构建会**明确报错**而不是让 release 静默失败 ——
 把 `rootfs_size_mb` 调小即可。
+
+### 型号
+
+一次构建产出**两套完整产物**，对应两块板子。**不能混用** —— 刷错了不是「少个网卡」
+那么简单：
+
+| 型号 | 网卡 | 设备树 root compatible | 板级模块 |
+| --- | --- | --- | --- |
+| `tc-eb5` | ASM2806 + 2× RTL8168（挂 PCIe1） | 追加 NIC-fix overlay → **`thundercomm,eb5`** | 装 `tc-eb5-pcie-helper` |
+| `lite-865` | RTL8153（挂 USB） | 仅基础 DTS → `qcom,qrb5165-rb5` | 不装 |
+
+产物名字带型号，例如 `nico-debian-sm8250-trixie-tc-eb5.boot.img`。
+
+**为什么必须分开刷**：`modules/tc-eb5/eb5-board.c` 的第一道门禁是
+`of_machine_is_compatible("thundercomm,eb5")`，而这个 compatible 正是由
+NIC-fix overlay 写进设备树的。所以：
+
+- 把 `tc-eb5` 的 boot.img 刷到 lite-865 上 → 板子自称 EB5，helper 会在一块**没有
+  ASM2806** 的硬件上去驱动 GPIO 82/88…；
+- 把 `lite-865` 的 boot.img 刷到 EB5 上 → 门禁返回 `-EINVAL`（在取 GPIO 之前就返回，
+  dmesg 里只留一行 `Refusing unsupported board/PCIe consumer`），PCIe 网卡不会起来。
+
+反过来说，`lite-865` 那套之所以安全，靠的就是这道门禁：即使手工 `modprobe`，
+基础 DTS 的 compatible 也过不了关。CI 的 `validate` job 会编译**两种**设备树，
+并断言 lite-865 那份里**不含** `thundercomm,eb5` / `pcie1-sequencer`。
 
 ### 关于 7.x 内核
 
@@ -148,7 +175,7 @@ config/
 dts/
   README.md                     设备树来源说明
   nico-debian-sm8250.dts        本地设备树快照（dtb_source=upstream-vendor-dg 时用）
-  patches/nic-fix-overlay.dtsi  网卡修复叠加层（with_nic_fix=true 时追加）
+  patches/nic-fix-overlay.dtsi  网卡修复叠加层（仅 tc-eb5 型号追加）
   custom/                       你自己放设备树的地方（dtb_source=custom）
 modules/
   tc-eb5/                       树外网卡修复模块（可选编译）
@@ -160,8 +187,10 @@ scripts/
   build-rootfs.sh               rootfs（debootstrap）构建
   mkrootfs-image.sh             rootfs → ext4 镜像
   build-bootimg.sh              打包 Android boot image
-  check-dts.sh                  设备树离线校验
+  check-dts.sh                  设备树离线校验（--no-overlay 校验 lite-865 那份）
   validate.sh                   仓库/脚本静态校验
+  dtc-warn-flags.sh             探测这份 dtc 认识哪些 -W 检查名
+  resolve-kernel-ref.sh         内核版本 -> git tag / 仓库 / kernelversion
   free-disk-space.sh            CI 上清理磁盘（arm64 安全）
 docs/
   FLASHING.md                   刷机步骤
@@ -184,9 +213,13 @@ sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
 export WORKSPACE=$PWD/work
 export KERNEL_VERSION=7.2
 export DTB_SOURCE=upstream-armbian
-export WITH_NIC_FIX=true
 export ROOTFS_SIZE_MB=6000
-export RELEASE_NAME=trixie
+
+# 型号二选一。CI 里这两个变量由 variants 矩阵决定，本地要自己设对：
+#   tc-eb5   -> WITH_NIC_FIX=true   （DT 追加 overlay，编板级模块）
+#   lite-865 -> WITH_NIC_FIX=false  （仅基础 DTS，不编模块）
+export WITH_NIC_FIX=true
+export RELEASE_NAME=trixie-tc-eb5
 
 bash scripts/fetch-kernel.sh
 bash scripts/fetch-dts.sh
@@ -205,16 +238,16 @@ bash scripts/build-bootimg.sh
 产物在 `work/out/`：
 
 ```
-nico-debian-sm8250-trixie.boot.img
-nico-debian-sm8250-trixie.boot-recovery.img
-nico-debian-sm8250-trixie.rootfs.img
+nico-debian-sm8250-trixie-tc-eb5.boot.img
+nico-debian-sm8250-trixie-tc-eb5.boot-recovery.img
+nico-debian-sm8250-trixie-tc-eb5.rootfs.img
 ```
 
 ---
 
 ## 已知问题 / 边界
 
-- **有线网卡需要树外模块**：主线 `qcom-pcie` 驱动在这块板上不会自己驱动 ASM2806 的电源/复位时序，`with_nic_fix=true` 时会额外编一个模块来做 GPIO 时序 + PERST 提供者 + 延迟绑定。详见 `docs/HARDWARE.md`。
+- **有线网卡需要树外模块**：主线 `qcom-pcie` 驱动在这块板上不会自己驱动 ASM2806 的电源/复位时序，`tc-eb5` 型号会额外编一个模块来做 GPIO 时序 + PERST 提供者 + 延迟绑定（`lite-865` 不需要，它的网卡在 USB 上）。详见 `docs/HARDWARE.md`。
 - 未验证：休眠/唤醒、冷启动多次循环、真实网络吞吐。
 - `rtl_nic/rtl8168h-2.fw` 缺失会导致 RTL8168 只能跑到降级速率（不影响连通）。
 - 本仓库不包含任何厂商固件/引导链（xbl、abl、tz、hyp 等），那些需要用底包单独刷。

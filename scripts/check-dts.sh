@@ -1,14 +1,28 @@
 #!/bin/sh
-# Validate the DTS + overlay by preprocessing and compiling it, using the
-# actual kernel source tree (needed for sm8250.dtsi and dt-bindings).
+# Validate the DTS by preprocessing and compiling it, using the actual kernel
+# source tree (needed for sm8250.dtsi and dt-bindings).
 #
-# Usage: scripts/check-dts.sh <path-to-linux-source>
+# Usage: scripts/check-dts.sh <path-to-linux-source> [--no-overlay]
+#
+#   default       tc-eb5 variant: base DTS + dts/patches/nic-fix-overlay.dtsi
+#   --no-overlay  lite-865 variant: base DTS only. Asserts the opposite of the
+#                 above -- the tree must NOT claim to be an EB5, because
+#                 eb5-board.c keys on of_machine_is_compatible("thundercomm,eb5")
+#                 and would otherwise drive the board GPIOs on hardware that
+#                 has no ASM2806.
 set -eu
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 KSRC="${1:-}"
+WITH_OVERLAY=1
+if [ "${2:-}" = "--no-overlay" ]; then
+    WITH_OVERLAY=0
+elif [ -n "${2:-}" ]; then
+    echo "usage: $0 <path-to-linux-source-tree> [--no-overlay]" >&2
+    exit 2
+fi
 if [ -z "$KSRC" ] || [ ! -f "$KSRC/Makefile" ]; then
-    echo "usage: $0 <path-to-linux-source-tree>" >&2
+    echo "usage: $0 <path-to-linux-source-tree> [--no-overlay]" >&2
     echo "(a full kernel source tree is needed for sm8250.dtsi and dt-bindings)" >&2
     exit 2
 fi
@@ -71,8 +85,14 @@ fi
 # ---------------------------------------------------------------------------
 # Merge + preprocess + compile
 # ---------------------------------------------------------------------------
-cat "$REPO_ROOT/dts/${DTS_FILE}.dts" \
-    "$REPO_ROOT/dts/patches/nic-fix-overlay.dtsi" > "$WORK/merged.dts"
+if [ "$WITH_OVERLAY" = "1" ]; then
+    echo "== variant: tc-eb5 (base DTS + nic-fix overlay) =="
+    cat "$REPO_ROOT/dts/${DTS_FILE}.dts" \
+        "$REPO_ROOT/dts/patches/nic-fix-overlay.dtsi" > "$WORK/merged.dts"
+else
+    echo "== variant: lite-865 (base DTS only) =="
+    cat "$REPO_ROOT/dts/${DTS_FILE}.dts" > "$WORK/merged.dts"
+fi
 echo "== merged: $(wc -l < "$WORK/merged.dts") lines =="
 
 echo "== preprocess =="
@@ -123,9 +143,36 @@ check() {
         FAIL=1
     fi
 }
+# Must NOT be in the tree (used by the lite-865 variant).
+check_absent() {
+    if grep -q "$1" "$WORK/decoded.dts"; then
+        echo "  PRESENT (must not be): $1"
+        FAIL=1
+    else
+        echo "  OK   absent: $1"
+    fi
+}
+
+check 'qcom,sm8250-pinctrl'
+
+if [ "$WITH_OVERLAY" = "0" ]; then
+    # lite-865: the tree must not claim to be an EB5 and must not carry the
+    # sequencer, otherwise the helper module would drive GPIO 82/88/... on a
+    # board that has no ASM2806 behind PCIe1.
+    check_absent 'thundercomm,eb5'
+    check_absent 'thundercomm,tc-eb5-pcie-sequencer'
+    check_absent 'pcie1-sequencer'
+    if [ "$FAIL" = "1" ]; then
+        echo "VALIDATION FAILED" >&2
+        exit 1
+    fi
+    echo "ALL CHECKS PASSED"
+    exit 0
+fi
+
 check 'pcie1-sequencer'
 check 'thundercomm,tc-eb5-pcie-sequencer'
-check 'qcom,sm8250-pinctrl'
+check 'thundercomm,eb5'
 check 'pci_e1'
 check 'iommu-map'
 check 'asm2806-controls-default'

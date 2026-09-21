@@ -294,22 +294,38 @@ if [[ "$TARGET_ENABLE_SSH" == "true" ]]; then
     chroot "$ROOTFS" systemctl enable ssh 2>&1 | tee -a "$LOGDIR/rootfs-misc.log" || true
 fi
 
-# DHCP on the two wired ports. The interfaces may not exist at first boot
-# (PCIe1 comes up late), so mark them optional.
+# Bring every wired port up with DHCP.
+#
+# NOTE: match by PREFIX, not by name. systemd predictable naming is active
+# (there is no net.ifnames=0 on the kernel command line), so the ports are
+# never called eth0/eth1:
+#   - EB5:        PCIe RTL8168s behind the ASM2806  -> enp1s0 / enp2s0
+#   - slim board: USB RTL8153                       -> enx302146000351 (MAC)
+# The old 20-eth0.network / 20-eth1.network matched neither, so networkd never
+# took ownership of the link and it just sat there, never even brought up:
+#   2: enx302146000351: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN
+# en* / eth* covers both boards and both naming schemes, and cannot match wifi
+# (wl*), bridges (docker0, br-*) or veth pairs.
+#
+# RequiredForOnline=no: this image runs on boards with two, one or zero cables
+# plugged in, so systemd-networkd-wait-online must not stall the boot waiting
+# for carrier on a port that will never get one.
 install -d -m 0755 "$ROOTFS/etc/systemd/network"
-for iface in eth0 eth1; do
-cat > "$ROOTFS/etc/systemd/network/20-$iface.network" <<EOF
+cat > "$ROOTFS/etc/systemd/network/20-wired.network" <<'EOF'
 [Match]
-Name=$iface
+Name=en* eth*
+
+[Link]
+RequiredForOnline=no
 
 [Network]
-DHCP=ipv4
+DHCP=yes
 IPv6AcceptRA=yes
 
 [DHCPv4]
 UseDomains=yes
+RouteMetric=100
 EOF
-done
 chroot "$ROOTFS" systemctl enable systemd-networkd 2>&1 | tee -a "$LOGDIR/rootfs-misc.log" || true
 chroot "$ROOTFS" systemctl enable systemd-resolved 2>&1 | tee -a "$LOGDIR/rootfs-misc.log" || true
 ln -sf /run/systemd/resolve/stub-resolv.conf "$ROOTFS/etc/resolv.conf"

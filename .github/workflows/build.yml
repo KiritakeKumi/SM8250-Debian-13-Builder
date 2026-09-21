@@ -22,11 +22,15 @@ on:
           - upstream-armbian
           - upstream-vendor-dg
           - custom
-      with_nic_fix:
-        description: "Build + install out-of-tree ASM2806/RTL8168 helper modules"
+      variants:
+        description: "Which board variants to build"
         required: true
-        default: true
-        type: boolean
+        default: "both"
+        type: choice
+        options:
+          - both
+          - tc-eb5
+          - lite-865
       rootfs_size_mb:
         description: "rootfs image size in MiB (must be >= real UFS rootfs partition)"
         required: true
@@ -90,8 +94,39 @@ jobs:
     name: Validate device tree and tooling
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      variants: ${{ steps.variants.outputs.list }}
     steps:
       - uses: actions/checkout@v4
+
+      # Which board variants this run builds. They differ ONLY in the device
+      # tree and in whether the out-of-tree helper is installed:
+      #
+      #   tc-eb5    NIC-fix overlay applied. The overlay rewrites the root
+      #             compatible to "thundercomm,eb5" and adds the PCIe1
+      #             sequencer node, which is what eb5-board.c gates on.
+      #             ASM2806 + 2x RTL8168 behind PCIe1.
+      #   lite-865  No overlay, no helper module. Root compatible stays
+      #             "qcom,qrb5165-rb5", so even a stray modprobe cannot touch
+      #             the board GPIOs: eb5_check_board() returns -EINVAL before
+      #             eb5_get_gpios() runs. NIC is a USB RTL8153.
+      #
+      # This is why one image cannot serve both boards: a tc-eb5 boot.img
+      # makes any board claim to be an EB5.
+      - name: Resolve which variants to build
+        id: variants
+        run: |
+          set -euo pipefail
+          # `inputs` is empty on push events, so the default builds both.
+          sel="${{ inputs.variants || 'both' }}"
+          case "$sel" in
+            tc-eb5)   list='["tc-eb5"]' ;;
+            lite-865) list='["lite-865"]' ;;
+            both)     list='["tc-eb5","lite-865"]' ;;
+            *) echo "ERROR: unknown variants selector '$sel'" >&2; exit 1 ;;
+          esac
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "will build: $list"
 
       - name: Install tools
         run: |
@@ -198,7 +233,12 @@ jobs:
       - name: Validate DTS + overlay
         run: |
           set -euo pipefail
+          # Both variants must compile, and the lite-865 tree must NOT claim
+          # to be an EB5 -- that is the only thing keeping the helper module
+          # away from the GPIOs on a board with no ASM2806.
           bash scripts/check-dts.sh "$PWD/kdts"
+          echo
+          bash scripts/check-dts.sh "$PWD/kdts" --no-overlay
 
       - name: Self-test the boot image packer
         run: |
@@ -213,10 +253,16 @@ jobs:
           bash scripts/validate.sh
 
   build:
-    name: Build (${{ inputs.kernel_version || '7.2' }} / ${{ inputs.dtb_source || 'upstream-armbian' }})
+    name: Build ${{ matrix.variant }} (${{ inputs.kernel_version || '7.2' }} / ${{ inputs.dtb_source || 'upstream-armbian' }})
     needs: validate
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 350
+
+    strategy:
+      # One board failing must not cancel the other board's build.
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.validate.outputs.variants) }}
 
     env:
       WORKSPACE: ${{ github.workspace }}/work
@@ -227,17 +273,24 @@ jobs:
       TARGET_HOSTNAME: ${{ inputs.hostname || 'nico-sm8250' }}
       TARGET_ROOT_PASSWORD: ${{ inputs.root_password || 'root' }}
       TARGET_EXTRA_PACKAGES: ${{ inputs.extra_packages || '' }}
-      RELEASE_NAME: ${{ inputs.build_release_name || 'trixie' }}
+      # The variant is carried in RELEASE_NAME so that every artifact name
+      # downstream (rootfs img, boot img, checksums, manifest) is namespaced
+      # without touching the build scripts:
+      #   nico-debian-sm8250-trixie-tc-eb5.boot.img
+      #   nico-debian-sm8250-trixie-lite-865.boot.img
+      RELEASE_NAME: ${{ inputs.build_release_name || 'trixie' }}-${{ matrix.variant }}
+      BOARD_VARIANT: ${{ matrix.variant }}
       DEBIAN_SUITE: trixie
       DEBIAN_MIRROR: http://deb.debian.org/debian
       DEBIAN_SECURITY_MIRROR: http://security.debian.org/debian-security
       SOURCE_DATE_EPOCH: "1700000000"
-      # NOTE: the boolean options (with_nic_fix / enable_ssh / make_default_user)
-      # are NOT resolved here. On push events `inputs` is empty, and the idiom
+      # NOTE: the boolean options (enable_ssh / make_default_user) are NOT
+      # resolved here. On push events `inputs` is empty, and the idiom
       #   ${{ inputs.x == false && 'false' || 'true' }}
       # evaluates to 'false' in that case (null == false is true in GH
-      # expressions), which silently disabled the NIC fix. They are resolved in
-      # the "Resolve build options" step below instead.
+      # expressions), which silently disabled them. They are resolved in the
+      # "Resolve build options" step below instead. WITH_NIC_FIX comes from
+      # the matrix variant, not from an input.
 
     steps:
       - name: Checkout
@@ -253,12 +306,19 @@ jobs:
       - name: Resolve build options
         run: |
           set -euo pipefail
+          # The board variant decides the NIC fix; it is not a free choice.
+          #   tc-eb5   -> DT overlay + out-of-tree helper (PCIe ASM2806/RTL8168)
+          #   lite-865 -> neither (USB RTL8153; no ASM2806 to sequence)
+          case "$BOARD_VARIANT" in
+            tc-eb5)   nic=true ;;
+            lite-865) nic=false ;;
+            *) echo "ERROR: unknown BOARD_VARIANT '$BOARD_VARIANT'" >&2; exit 1 ;;
+          esac
           # Defaults, used for push events where there are no inputs.
-          nic=true; ssh=true; usr=true
+          ssh=true; usr=true
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             # `inputs.X` renders as the literal string 'true'/'false' here.
-            [[ "${{ inputs.with_nic_fix }}"     == "false" ]] && nic=false
-            [[ "${{ inputs.enable_ssh }}"       == "false" ]] && ssh=false
+            [[ "${{ inputs.enable_ssh }}"        == "false" ]] && ssh=false
             [[ "${{ inputs.make_default_user }}" == "false" ]] && usr=false
           fi
           {
@@ -266,7 +326,7 @@ jobs:
             echo "TARGET_ENABLE_SSH=$ssh"
             echo "TARGET_MAKE_USER=$usr"
           } | tee -a "$GITHUB_ENV"
-          echo "resolved: nic_fix=$nic ssh=$ssh default_user=$usr"
+          echo "resolved: variant=$BOARD_VARIANT nic_fix=$nic ssh=$ssh default_user=$usr"
 
       - name: Show runner info
         run: |
@@ -333,10 +393,10 @@ jobs:
           # scripts/fetch-kernel.sh now validates the version and refetches if
           # it does not match, but starting from a clean key avoids the
           # pointless download in the first place.
-          key: v2-kbuild-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-${{ env.WITH_NIC_FIX }}-${{ hashFiles('config/kernel-fragment.config', 'dts/**') }}
+          key: v3-kbuild-${{ matrix.variant }}-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-${{ hashFiles('config/kernel-fragment.config', 'dts/**') }}
           restore-keys: |
-            v2-kbuild-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-
-            v2-kbuild-${{ env.KERNEL_VERSION }}-
+            v3-kbuild-${{ matrix.variant }}-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-
+            v3-kbuild-${{ matrix.variant }}-${{ env.KERNEL_VERSION }}-
 
       - name: Prepare directories
         run: |
@@ -350,7 +410,14 @@ jobs:
         run: bash scripts/fetch-dts.sh
 
       - name: Preflight DTS check
-        run: bash scripts/check-dts.sh "$WORKSPACE/src/linux-$KERNEL_VERSION"
+        run: |
+          set -euo pipefail
+          # Check the tree this variant will actually ship.
+          if [[ "$WITH_NIC_FIX" == "true" ]]; then
+            bash scripts/check-dts.sh "$WORKSPACE/src/linux-$KERNEL_VERSION"
+          else
+            bash scripts/check-dts.sh "$WORKSPACE/src/linux-$KERNEL_VERSION" --no-overlay
+          fi
 
       - name: Build kernel
         run: bash scripts/build-kernel.sh
@@ -404,9 +471,14 @@ jobs:
         run: |
           set -euo pipefail
           cd "$OUTDIR"
-          sha256sum *.img *.img.gz > SHA256SUMS
-          cat > MANIFEST.txt <<EOF
+          # Per-variant names: both variants' assets land in the same release,
+          # so a plain "SHA256SUMS" would have one overwrite the other.
+          SUMS="SHA256SUMS-${RELEASE_NAME}"
+          MANIFEST="MANIFEST-${RELEASE_NAME}.txt"
+          sha256sum *.img *.img.gz > "$SUMS"
+          cat > "$MANIFEST" <<EOF
           image_name:      ${IMAGE_NAME}
+          board_variant:   $BOARD_VARIANT
           kernel_version:  $KERNEL_VERSION
           dtb_source:      $DTB_SOURCE
           with_nic_fix:    $WITH_NIC_FIX
@@ -421,7 +493,7 @@ jobs:
           build_date_utc:  $(date -u +%Y-%m-%dT%H:%M:%SZ)
           EOF
           ls -lh
-          cat MANIFEST.txt
+          cat "$MANIFEST"
 
           # a small file that lists exactly what goes into the release, so the
           # release job never picks up build logs by accident
@@ -429,21 +501,21 @@ jobs:
           ${IMAGE_NAME}-${RELEASE_NAME}.boot.img
           ${IMAGE_NAME}-${RELEASE_NAME}.boot-recovery.img
           ${IMAGE_NAME}-${RELEASE_NAME}.rootfs.img.gz
-          SHA256SUMS
-          MANIFEST.txt
+          $SUMS
+          $MANIFEST
           EOF
-          echo "---- release assets ----"
+          echo "---- release assets ($BOARD_VARIANT) ----"
           cat RELEASE-ASSETS.txt
 
       - name: Upload boot images
         uses: actions/upload-artifact@v4
         with:
-          name: boot-images-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-nic${{ env.WITH_NIC_FIX }}
+          name: boot-images-${{ matrix.variant }}-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}
           path: |
             work/out/*.boot.img
             work/out/*.boot-recovery.img
-            work/out/SHA256SUMS
-            work/out/MANIFEST.txt
+            work/out/SHA256SUMS-*
+            work/out/MANIFEST-*.txt
             work/out/RELEASE-ASSETS.txt
           if-no-files-found: error
           compression-level: 0
@@ -452,7 +524,7 @@ jobs:
       - name: Upload rootfs image
         uses: actions/upload-artifact@v4
         with:
-          name: rootfs-image-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-nic${{ env.WITH_NIC_FIX }}
+          name: rootfs-image-${{ matrix.variant }}-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}
           path: |
             work/out/*.rootfs.img
             work/out/*.rootfs.img.gz
@@ -465,7 +537,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}
+          name: build-logs-${{ matrix.variant }}-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}
           path: |
             work/logs/**
           if-no-files-found: ignore
@@ -482,27 +554,13 @@ jobs:
     # The artifact names embed these, so they must be set here too. `env` is
     # per-job in GitHub Actions, not workflow-wide.
     #
-    # WITH_NIC_FIX is resolved the same way the build job does it: the inline
-    # `inputs.x == false && ... || ...` idiom is wrong on push events (where
-    # `inputs` is empty and `null == false` is true), which is what produced
-    # artifact names like "...-nicfalse".
+    # The board variant is NOT resolved here: both variants' artifacts are
+    # matched by glob below, so this job does not need to know which ones ran.
     env:
       KERNEL_VERSION: ${{ inputs.kernel_version || '7.2' }}
       DTB_SOURCE: ${{ inputs.dtb_source || 'upstream-armbian' }}
 
     steps:
-      - name: Resolve artifact suffix
-        id: opts
-        run: |
-          set -euo pipefail
-          nic=true
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            [[ "${{ inputs.with_nic_fix }}" == "false" ]] && nic=false
-          fi
-          echo "WITH_NIC_FIX=$nic" >> "$GITHUB_ENV"
-          echo "with_nic_fix=$nic" >> "$GITHUB_OUTPUT"
-          echo "artifact suffix: nic$nic"
-
       # Decide first, so a manual run without publish_release=true does no work.
       - name: Resolve release tag
         id: rel
@@ -528,51 +586,68 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "will publish as: $TAG"
 
-      # NOTE: only the boot-images artifact is downloaded here. The rootfs image
-      # artifact holds both the raw .img (up to ROOTFS_SIZE_MB, way past the
-      # 2 GiB per-asset release limit) and the .gz. Downloading the whole
-      # artifact and globbing dist/** would try to upload the raw .img too --
-      # which is exactly what failed before with
-      #   "size must be less than 2147483648".
-      - name: Download boot images
+      # NOTE: the boot-images and rootfs artifacts are downloaded into SEPARATE
+      # trees. The rootfs artifact holds both the raw .img (up to
+      # ROOTFS_SIZE_MB, way past the 2 GiB per-asset release limit) and the .gz;
+      # globbing dist/** would try to upload the raw .img too -- which is
+      # exactly what failed before with "size must be less than 2147483648".
+      #
+      # `pattern:` without merge-multiple puts each artifact in its own
+      # subdirectory, so the two variants cannot overwrite each other.
+      - name: Download boot images (all variants)
         if: steps.rel.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: boot-images-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-nic${{ env.WITH_NIC_FIX }}
+          pattern: boot-images-*
           path: dist
 
-      - name: Download compressed rootfs
+      - name: Download compressed rootfs (all variants)
         if: steps.rel.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: rootfs-image-${{ env.KERNEL_VERSION }}-${{ env.DTB_SOURCE }}-nic${{ env.WITH_NIC_FIX }}
+          pattern: rootfs-image-*
           path: rootfs-artifact
 
       - name: Assemble release assets
         if: steps.rel.outputs.publish == 'true'
         run: |
           set -euo pipefail
-          # keep only what RELEASE-ASSETS.txt lists
-          if [[ -f dist/RELEASE-ASSETS.txt ]]; then
-            mkdir -p release
+          shopt -s nullglob
+          mkdir -p release
+
+          lists=(dist/*/RELEASE-ASSETS.txt)
+          if [[ ${#lists[@]} -eq 0 ]]; then
+            echo "ERROR: no RELEASE-ASSETS.txt in any downloaded artifact" >&2
+            ls -R dist rootfs-artifact >&2 || true
+            exit 1
+          fi
+
+          # keep only what each variant's RELEASE-ASSETS.txt lists
+          for list in "${lists[@]}"; do
+            d="$(dirname "$list")"
+            echo "---- $(basename "$d") ----"
             while read -r f; do
               [[ -z "$f" ]] && continue
-              if [[ -f "dist/$f" ]]; then
-                cp "dist/$f" release/
-              elif [[ -f "rootfs-artifact/$f" ]]; then
-                cp "rootfs-artifact/$f" release/
-              else
-                echo "ERROR: release asset '$f' not found in either artifact" >&2
+              if [[ -f "$d/$f" ]]; then
+                cp "$d/$f" release/
+                echo "  + $f"
+                continue
+              fi
+              found=0
+              for rd in rootfs-artifact/*/; do
+                if [[ -f "$rd$f" ]]; then
+                  cp "$rd$f" release/
+                  echo "  + $f"
+                  found=1
+                  break
+                fi
+              done
+              if (( ! found )); then
+                echo "ERROR: release asset '$f' not found in any artifact" >&2
                 exit 1
               fi
-            done < dist/RELEASE-ASSETS.txt
-          else
-            echo "no RELEASE-ASSETS.txt; falling back to a safe glob" >&2
-            mkdir -p release
-            cp dist/*.boot.img dist/*.boot-recovery.img \
-               dist/SHA256SUMS dist/MANIFEST.txt release/ 2>/dev/null || true
-            cp rootfs-artifact/*.rootfs.img.gz release/ 2>/dev/null || true
-          fi
+            done < "$list"
+          done
 
           echo "---- release payload ----"
           ls -lh release/
@@ -592,12 +667,22 @@ jobs:
         if: steps.rel.outputs.publish == 'true'
         run: |
           set -euo pipefail
+          shopt -s nullglob
           {
             echo "自动构建的 Debian 13 系统镜像。"
             echo
-            echo '```'
-            cat release/MANIFEST.txt 2>/dev/null || echo "(no manifest)"
-            echo '```'
+            echo "## 选哪一个"
+            echo
+            echo "**两个型号的镜像不能混用**：boot.img 里的设备树决定了板子的身份。"
+            echo "\`tc-eb5\` 的设备树把 root compatible 改写成 \`thundercomm,eb5\`，"
+            echo "板级 helper 模块（\`eb5-board.c\`）正是靠这个判断要不要去跑 ASM2806"
+            echo "的 GPIO 上电/PERST 时序。把它刷到 lite-865 上，模块就会在一块没有"
+            echo "ASM2806 的板子上驱动 GPIO 82/88…；反过来刷，EB5 的 PCIe 网卡不会起来。"
+            echo
+            echo '| 型号 | 网卡 | 设备树 | 板级模块 |'
+            echo '| --- | --- | --- | --- |'
+            echo '| `tc-eb5` | ASM2806 + 2× RTL8168（PCIe1） | 带 NIC-fix overlay，`thundercomm,eb5` | 装 `tc-eb5-pcie-helper` |'
+            echo '| `lite-865` | RTL8153（USB） | 仅基础 DTS，`qcom,qrb5165-rb5` | 不装 |'
             echo
             echo "## 产物"
             echo
@@ -610,23 +695,48 @@ jobs:
             echo "> GitHub Release 单个附件上限是 2 GiB，所以 rootfs 以 \`.img.gz\` 形式提供。"
             echo "> 解压：\`gunzip -k <*.rootfs.img.gz>\`。未压缩的 \`.img\` 在 Actions artifact 里。"
             echo
-            echo "## 校验"
-            echo
-            echo '```'
-            cat release/SHA256SUMS 2>/dev/null || echo "(no checksums)"
-            echo '```'
-            echo
-            echo "> \`SHA256SUMS\` 同时包含解压后的 \`.img\` 和 \`.img.gz\` 的哈希。"
-            echo "> 校验压缩包：\`sha256sum -c SHA256SUMS --ignore-missing\`"
-            echo
             echo "## 刷机"
             echo
-            echo '```bash'
-            echo 'gunzip -k nico-debian-sm8250-trixie.rootfs.img.gz'
-            echo 'fastboot flash rootfs nico-debian-sm8250-trixie.rootfs.img'
-            echo 'fastboot flash boot   nico-debian-sm8250-trixie.boot.img'
-            echo 'fastboot reboot'
-            echo '```'
+            for m in release/MANIFEST-*.txt; do
+              v=$(sed -n 's/^board_variant:[[:space:]]*//p' "$m")
+              base=$(sed -n 's/^image_name:[[:space:]]*//p' "$m")
+              rel=$(sed -n 's/^release:[[:space:]]*//p' "$m")
+              echo "### $v"
+              echo
+              echo '```bash'
+              echo "gunzip -k ${base}-${rel}.rootfs.img.gz"
+              echo "fastboot flash rootfs ${base}-${rel}.rootfs.img"
+              echo "fastboot flash boot   ${base}-${rel}.boot.img"
+              echo 'fastboot reboot'
+              echo '```'
+              echo
+            done
+            echo "## 构建信息"
+            echo
+            for m in release/MANIFEST-*.txt; do
+              echo "<details><summary>$(basename "$m")</summary>"
+              echo
+              echo '```'
+              cat "$m"
+              echo '```'
+              echo
+              echo "</details>"
+              echo
+            done
+            echo "## 校验"
+            echo
+            for s in release/SHA256SUMS-*; do
+              echo "<details><summary>$(basename "$s")</summary>"
+              echo
+              echo '```'
+              cat "$s"
+              echo '```'
+              echo
+              echo "</details>"
+              echo
+            done
+            echo "> \`SHA256SUMS-*\` 同时包含解压后的 \`.img\` 和 \`.img.gz\` 的哈希。"
+            echo "> 校验压缩包：\`sha256sum -c SHA256SUMS-<型号> --ignore-missing\`"
             echo
             echo "详见仓库里的 \`docs/FLASHING.md\`。"
           } > release-notes.md
@@ -637,7 +747,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.rel.outputs.tag }}
-          name: "Debian 13 for DG-SVR-865-TINY (${{ inputs.kernel_version || '7.2' }}, ${{ inputs.dtb_source || 'upstream-armbian' }})"
+          name: "Debian 13 for DG-SVR-865-TINY / tc-eb5 + lite-865 (${{ inputs.kernel_version || '7.2' }}, ${{ inputs.dtb_source || 'upstream-armbian' }})"
           body_path: release-notes.md
           # explicit directory, NOT dist/** -- dist would also sweep in the raw
           # rootfs .img (over the 2 GiB per-asset limit) and any build logs.

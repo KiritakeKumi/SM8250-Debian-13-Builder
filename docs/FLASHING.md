@@ -97,7 +97,7 @@ fastboot fetch hyp hyp-backup.img     # 如果 bootloader 支持 fetch
 本仓库的 `build-bootimg.sh` 会在超长时直接报错，所以正常不会踩到。
 
 **Q: 起来了但是没有 eth0/eth1？**
-说明 `with_nic_fix` 没开，或者 `modules/tc-eb5/` 的模块没装进去。检查：
+说明刷的是 `lite-865` 那套镜像（它不带板级模块），或者 `modules/tc-eb5/` 的模块没装进去。检查：
 
 ```bash
 lsmod | grep tc-eb5

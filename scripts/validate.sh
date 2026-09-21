@@ -457,6 +457,98 @@ else
     bad "build-kernel.sh compares the raw KERNEL_VERSION (7.2 vs 7.2.0 mismatch)"
 fi
 
+echo "== the two board variants must stay separated end to end =="
+# tc-eb5 and lite-865 differ ONLY in the device tree and the helper module,
+# and that difference is load-bearing: the NIC-fix overlay rewrites the root
+# compatible to "thundercomm,eb5", which is exactly what eb5-board.c gates on
+# (of_machine_is_compatible). A tc-eb5 boot.img on a lite-865 therefore drives
+# GPIO 82/88/... on hardware that has no ASM2806 behind PCIe1.
+for v in tc-eb5 lite-865; do
+    if grep -q "$v" .github/workflows/build.yml; then
+        ok "workflow knows the '$v' variant"
+    else
+        bad "workflow does not mention the '$v' variant"
+    fi
+done
+if grep -q 'matrix:' .github/workflows/build.yml && \
+   grep -q 'fromJSON(needs.validate.outputs.variants)' .github/workflows/build.yml; then
+    ok "build job is a matrix driven by the validate job's variant list"
+else
+    bad "build job does not fan out over the board variants"
+fi
+# WITH_NIC_FIX must follow the variant, never a free-standing input: a tc-eb5
+# build without the helper, or a lite-865 build with it, is a broken image.
+# Scope the search to the workflow_dispatch inputs -- "with_nic_fix:" also
+# appears as a MANIFEST field, which is fine.
+wf_inputs=$(sed -n '/^  workflow_dispatch:/,/^  push:/p' .github/workflows/build.yml)
+if printf '%s\n' "$wf_inputs" | grep -qE '^      with_nic_fix:'; then
+    bad "with_nic_fix is still a separate input; it must follow the board variant"
+else
+    ok "no free-standing with_nic_fix input"
+fi
+if printf '%s\n' "$wf_inputs" | grep -qE '^      variants:'; then
+    ok "the workflow takes a board-variant selector"
+else
+    bad "the workflow has no board-variant selector"
+fi
+if grep -q 'tc-eb5)   nic=true' .github/workflows/build.yml && \
+   grep -q 'lite-865) nic=false' .github/workflows/build.yml; then
+    ok "the NIC fix is derived from the board variant"
+else
+    bad "the NIC fix is not derived from the board variant"
+fi
+# Both variants' assets share one release, so nothing may have a fixed name.
+if grep -q 'SHA256SUMS-\${RELEASE_NAME}' .github/workflows/build.yml && \
+   grep -q 'MANIFEST-\${RELEASE_NAME}.txt' .github/workflows/build.yml; then
+    ok "checksums and manifest are named per variant"
+else
+    bad "checksums/manifest have a fixed name; the two variants would overwrite each other"
+fi
+if grep -q 'RELEASE_NAME: .*matrix.variant' .github/workflows/build.yml; then
+    ok "image file names carry the board variant"
+else
+    bad "image file names do not carry the board variant"
+fi
+# check-dts.sh must be able to prove the lite-865 tree is NOT an EB5.
+if grep -q 'no-overlay' scripts/check-dts.sh; then
+    ok "check-dts.sh can validate the lite-865 (no overlay) tree"
+else
+    bad "check-dts.sh cannot validate the no-overlay tree"
+fi
+if grep -q "check_absent 'thundercomm,eb5'" scripts/check-dts.sh; then
+    ok "the lite-865 tree is asserted NOT to claim thundercomm,eb5"
+else
+    bad "nothing stops the lite-865 tree from claiming to be an EB5"
+fi
+if grep -q 'check-dts.sh "$PWD/kdts" --no-overlay' .github/workflows/build.yml; then
+    ok "CI validates both device tree variants"
+else
+    bad "CI only validates one device tree variant"
+fi
+
+echo "== wired ports must be matched by prefix, not by a fixed name =="
+# The image serves two boards with different NIC topologies, and predictable
+# naming is active (no net.ifnames=0 on the cmdline), so no port is ever
+# called eth0/eth1:
+#   EB5        PCIe RTL8168 -> enp1s0 / enp2s0
+#   slim board USB  RTL8153 -> enx302146000351
+# Matching Name=eth0/eth1 left the link unmanaged and DOWN with qdisc noop.
+if grep -q 'Name=en\* eth\*' scripts/build-rootfs.sh; then
+    ok "networkd matches wired ports by prefix (en* eth*)"
+else
+    bad "networkd does not match wired ports by prefix; USB/PCIe NICs stay DOWN"
+fi
+if grep -qE '^Name=(eth0|eth1)$' scripts/build-rootfs.sh; then
+    bad "a fixed-name .network match (eth0/eth1) is back; it matches nothing on these boards"
+else
+    ok "no fixed-name eth0/eth1 .network match"
+fi
+if grep -q 'RequiredForOnline=no' scripts/build-rootfs.sh; then
+    ok "wait-online cannot stall the boot on an unplugged port"
+else
+    bad "no RequiredForOnline=no; booting with a cable unplugged waits for carrier"
+fi
+
 echo "== the rootfs UUID must be pinned, not random per build =="
 # mkfs.ext4 rolls a random UUID unless given -U, and build-bootimg.sh bakes it
 # into root=UUID=... So a random UUID makes boot.img and rootfs.img a matched
