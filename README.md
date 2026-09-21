@@ -43,7 +43,7 @@ GitHub 的 **arm64 runner 只有 14 GB 磁盘**（`ubuntu-24.04-arm`）。本流
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `kernel_version` | `6.18.35` | 内核版本，取 kernel.org 的 tarball。**支持 7.x**，见下方说明 |
+| `kernel_version` | `7.2` | 内核版本，取 kernel.org 的 tarball。想回 6.18 稳定线就填 `6.18.35`，见下方说明 |
 | `dtb_source` | `upstream-armbian` | 设备树来源：`upstream-armbian`（官方主线 DT）/ `upstream-vendor-dg`（本地快照）/ `custom`（`dts/custom/`） |
 | `with_nic_fix` | `true` | 是否编译并安装树外网卡修复模块（ASM2806 + 双 RTL8168 枚举） |
 | `rootfs_size_mb` | `6000` | rootfs 镜像大小（MiB）。必须 ≥ 板子 rootfs 分区实际大小 |
@@ -86,7 +86,8 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 ### 关于 7.x 内核
 
-`kernel_version` 填 `7.2` / `7.2.6` / `7.0` 等都可以。已验证过：
+**默认就是 `7.2`。** 想要 6.18 稳定线，把 `kernel_version` 填成 `6.18.35`；
+`7.2.6` / `7.0` 这类也都可以。7.2 上已验证过：
 
 - 模块用到的 **60 个内核 API 在 7.2 上全部存在**
 - `device_has_driver_override()` 在 7.0+ 原生就有（6.18 是靠 backport）
@@ -96,10 +97,20 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 **注意**：Armbian 只在 `sm8250-6.12` 和 `sm8250-6.18` 目录里带这块板的 DT，
 没有 7.x 版本。所以 7.x 构建时 `fetch-dts.sh` 会自动回退到仓库内的快照
-（`dts/nico-debian-sm8250.dts`），这份快照已验证能在 7.2 上编译。
+（`dts/nico-debian-sm8250.dts`），这份快照已验证能在 7.2 上编译。也就是说
+默认的 `dtb_source=upstream-armbian` 在 7.x 下实际用的是仓库快照。
 
-> 7.x 的内核**还没在真机上启动验证过**。首次测试建议用
-> `fastboot boot`（RAM boot）而不是刷写，这样出问题不影响现有系统。
+写版本号时注意两件事（脚本已经处理，填错不会静默走偏）：
+
+- `7.2` 这种两段版本，tag 是 `v7.2`，但内核自报的版本是 **`7.2.0`**
+  （`SUBLEVEL = 0`），`/lib/modules/` 目录名同理
+- 稳定点版本（`7.2.6`、`6.18.35`）只在 gregkh/linux 里打了 tag，
+  torvalds/linux 里没有
+
+> ⚠️ 7.x 的内核**还没在真机上启动验证过**（只验证了能编译、API 齐全、配置项都在）。
+> 默认切到 7.2 之后，默认产物就是这个未经真机验证的内核。首次测试请用
+> `fastboot boot`（RAM boot）而不是刷写，这样出问题不影响现有系统；
+> 要稳妥就把 `kernel_version` 填回 `6.18.35`。
 
 ---
 
@@ -171,7 +182,7 @@ sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
     python3 python3-pip
 
 export WORKSPACE=$PWD/work
-export KERNEL_VERSION=6.18.35
+export KERNEL_VERSION=7.2
 export DTB_SOURCE=upstream-armbian
 export WITH_NIC_FIX=true
 export ROOTFS_SIZE_MB=6000
@@ -207,7 +218,8 @@ nico-debian-sm8250-trixie.rootfs.img
 - 未验证：休眠/唤醒、冷启动多次循环、真实网络吞吐。
 - `rtl_nic/rtl8168h-2.fw` 缺失会导致 RTL8168 只能跑到降级速率（不影响连通）。
 - 本仓库不包含任何厂商固件/引导链（xbl、abl、tz、hyp 等），那些需要用底包单独刷。
-- **7.x 内核还没在真机上启动验证过**（只验证了能编译、API 齐全、配置项都在）。
+- **7.x 内核还没在真机上启动验证过**（只验证了能编译、API 齐全、配置项都在），
+  而它现在是**默认**版本 —— 要稳妥就把 `kernel_version` 填回 `6.18.35`。
 
 ## 致谢
 

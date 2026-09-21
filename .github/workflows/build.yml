@@ -8,7 +8,10 @@ on:
       kernel_version:
         description: "Linux kernel version (kernel.org tarball)"
         required: true
-        default: "6.18.35"
+        # NOTE: this default and every `inputs.kernel_version || '...'` fallback
+        # below must stay in sync -- scripts/validate.sh enforces it. The
+        # fallbacks are what push events use, since `inputs` is empty there.
+        default: "7.2"
         type: string
       dtb_source:
         description: "Device tree source"
@@ -100,7 +103,7 @@ jobs:
       - name: Fetch kernel DT headers (sparse, retried)
         run: |
           set -euo pipefail
-          KVER="${{ inputs.kernel_version || '6.18.35' }}"
+          KVER="${{ inputs.kernel_version || '7.2' }}"
 
           # Resolve the tag + repo with the shared helper. Doing this inline
           # used to be wrong for a bare "7.2": ${KVER%.*} stripped ".2" and
@@ -210,7 +213,7 @@ jobs:
           bash scripts/validate.sh
 
   build:
-    name: Build (${{ inputs.kernel_version || '6.18.35' }} / ${{ inputs.dtb_source || 'upstream-armbian' }})
+    name: Build (${{ inputs.kernel_version || '7.2' }} / ${{ inputs.dtb_source || 'upstream-armbian' }})
     needs: validate
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 350
@@ -218,7 +221,7 @@ jobs:
     env:
       WORKSPACE: ${{ github.workspace }}/work
       OUTDIR: ${{ github.workspace }}/work/out
-      KERNEL_VERSION: ${{ inputs.kernel_version || '6.18.35' }}
+      KERNEL_VERSION: ${{ inputs.kernel_version || '7.2' }}
       DTB_SOURCE: ${{ inputs.dtb_source || 'upstream-armbian' }}
       ROOTFS_SIZE_MB: ${{ inputs.rootfs_size_mb || '6000' }}
       TARGET_HOSTNAME: ${{ inputs.hostname || 'nico-sm8250' }}
@@ -484,7 +487,7 @@ jobs:
     # `inputs` is empty and `null == false` is true), which is what produced
     # artifact names like "...-nicfalse".
     env:
-      KERNEL_VERSION: ${{ inputs.kernel_version || '6.18.35' }}
+      KERNEL_VERSION: ${{ inputs.kernel_version || '7.2' }}
       DTB_SOURCE: ${{ inputs.dtb_source || 'upstream-armbian' }}
 
     steps:
@@ -634,7 +637,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.rel.outputs.tag }}
-          name: "Debian 13 for DG-SVR-865-TINY (${{ inputs.kernel_version || '6.18.35' }}, ${{ inputs.dtb_source || 'upstream-armbian' }})"
+          name: "Debian 13 for DG-SVR-865-TINY (${{ inputs.kernel_version || '7.2' }}, ${{ inputs.dtb_source || 'upstream-armbian' }})"
           body_path: release-notes.md
           # explicit directory, NOT dist/** -- dist would also sweep in the raw
           # rootfs .img (over the 2 GiB per-asset limit) and any build logs.

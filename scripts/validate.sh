@@ -457,6 +457,41 @@ else
     bad "build-kernel.sh compares the raw KERNEL_VERSION (7.2 vs 7.2.0 mismatch)"
 fi
 
+echo "== the default kernel version must be stated once, consistently =="
+# `inputs` is empty on push events, so every one of these fallbacks is a real
+# default -- and there are five of them plus the input's own `default:`. They
+# have to agree, or a push build and a manual build silently build different
+# kernels (and the release job downloads artifacts that do not exist).
+# Comment lines are stripped first: the workflow quotes the fallback idiom in
+# an explanatory comment.
+wf_code=$(grep -vE '^[[:space:]]*#' .github/workflows/build.yml)
+kv_default=$(printf '%s\n' "$wf_code" | grep -A4 '^      kernel_version:' \
+             | grep -oE 'default: "[^"]+"' | head -1 | cut -d'"' -f2)
+mapfile -t kv_fallbacks < <(printf '%s\n' "$wf_code" \
+                            | grep -oE "inputs\.kernel_version \|\| '[^']+'" \
+                            | grep -oE "'[^']+'" | tr -d "'" | sort -u)
+if [[ -z "$kv_default" ]]; then
+    bad "could not read the kernel_version input default"
+elif [[ ${#kv_fallbacks[@]} -ne 1 ]]; then
+    bad "kernel_version fallbacks disagree: ${kv_fallbacks[*]}"
+elif [[ "${kv_fallbacks[0]}" != "$kv_default" ]]; then
+    bad "kernel_version default is '$kv_default' but the fallbacks say '${kv_fallbacks[0]}'"
+else
+    ok "default kernel version is '$kv_default' everywhere"
+    # and it must be a version the resolver accepts
+    if bash scripts/resolve-kernel-ref.sh "$kv_default" --format=env >/dev/null 2>&1; then
+        ok "the default version resolves to a real tag"
+    else
+        bad "the default version '$kv_default' is not a resolvable kernel version"
+    fi
+    # README documents it in the parameter table; keep them honest
+    if grep -q "\`kernel_version\` | \`$kv_default\`" README.md; then
+        ok "README documents $kv_default as the default"
+    else
+        bad "README's parameter table does not list $kv_default as the kernel_version default"
+    fi
+fi
+
 echo "== dtc warning flags must be probed, not hardcoded =="
 # dtc check names are not stable across versions and an unknown -Wno-<name> is
 # FATAL, not ignored. The dtc bundled with Linux 7.2 dropped
