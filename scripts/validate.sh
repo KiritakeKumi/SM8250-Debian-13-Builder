@@ -405,6 +405,35 @@ if grep -q 'resolve-kernel-ref' scripts/validate.sh; then
 else
     bad "validator does not mention the resolver"
 fi
+# Functional check, not a grep: both callers consume the env format with
+# `eval`, so it has to survive eval verbatim. KERNEL_KIND holds a value with
+# spaces ("major.minor release"); printed unquoted, eval parsed the line as
+#   KERNEL_KIND=major.minor release
+# and tried to run `release`, killing the CI step with
+#   line 13: release: command not found   (exit 127)
+for v in 7.2 6.18.35; do
+    if out=$(bash -c '
+                set -euo pipefail
+                eval "$(bash scripts/resolve-kernel-ref.sh "$1" --format=env)"
+                printf "%s|%s|%s\n" "$KERNEL_TAG" "$KERNEL_SERIES" "$KERNEL_KIND"
+            ' _ "$v" 2>&1); then
+        IFS='|' read -r r_tag r_series r_kind <<<"$out"
+        if [[ "$r_tag" == "v$v" && -n "$r_series" && -n "$r_kind" ]]; then
+            ok "resolver env output evals cleanly for $v (tag=$r_tag, kind=$r_kind)"
+        else
+            bad "resolver env output is wrong for $v: $out"
+        fi
+    else
+        bad "resolver env output is not eval-safe for $v: $out"
+    fi
+done
+# An unknown --format must be an error, not a silent fallback to the
+# human-readable format -- eval'ing that would run its first field, "version".
+if bash scripts/resolve-kernel-ref.sh 7.2 --format=bogus >/dev/null 2>&1; then
+    bad "resolver accepts an unknown --format (eval would run 'version')"
+else
+    ok "resolver rejects an unknown --format"
+fi
 
 echo "== kernel.org paths must be derived correctly for 6.x and 7.x =="
 # ${VERSION%.*} on a bare "7.2" yields "7", which would give the wrong series
